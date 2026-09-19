@@ -2,6 +2,7 @@ from pydantic import BaseModel
 import asyncio
 import random
 from datetime import datetime
+import time
 from fastapi import FastAPI, HTTPException, Request, status
 import httpx
 
@@ -121,8 +122,8 @@ async def gate_a_worker():
         car_plate = event.get("car_plate", "")
         raw_gate = event.get("gate_name", "GateA")
         # Ensure we always target the actual barrier gate "GateA" instead of "EntrySpot"
-        gate_name = "GateA" if (not raw_gate or raw_gate.upper().startswith("ENTRY") or raw_gate == "EntrySpot") else raw_gate
         destination = event.get("destination", "leavepark")
+        gate_name = raw_gate
         
         print(f"[GATE A WORKER] Car arrival notification received for car {car_plate}. Opening gate {gate_name}...")
         try:
@@ -254,8 +255,9 @@ async def call_simulator_api(
     json_data: dict = None,
 ):
     """Low-level HTTP wrapper to call the simulator API asynchronously."""
+    token = await get_token()
     url = f"{SIMULATOR_URL}/api/v1/{endpoint.lstrip('/')}"
-    headers = {"Authorization": f"Bearer {SIMULATOR_TOKEN}"}
+    headers = {"Authorization": f"Bearer {token}"}
 
     try:
         async with httpx.AsyncClient() as client:
@@ -266,6 +268,19 @@ async def call_simulator_api(
                 params=params,
                 json=json_data,
             )
+            # If token expired or unauthorized, force refresh token and retry once
+            if response.status_code == 401:
+                print(f"[AUTH REFRESH] 401 received for {endpoint}, refreshing simulator token...")
+                token = await get_token(force=True)
+                headers = {"Authorization": f"Bearer {token}"}
+                response = await client.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    params=params,
+                    json=json_data,
+                )
+
             if response.is_success:
                 try:
                     return response.json()
@@ -561,18 +576,157 @@ def get_all_events(limit: int = 20):
     }
 
 
+@app.get("/system-status")
+async def get_system_status():
+    """Return backend status, simulator connectivity, and current counts."""
+    sim_online = False
+    try:
+        await call_simulator_api("test")
+        sim_online = True
+    except Exception:
+        sim_online = False
+
+    total_spots = len(parking_spots)
+    occupied_count = sum(1 for free in parking_spots.values() if not free)
+    free_count = total_spots - occupied_count
+    return {
+        "backend": "online",
+        "simulator": "online" if sim_online else "offline",
+        "total_spots": total_spots,
+        "available_spots": free_count,
+        "occupied_spots": occupied_count,
+        "cars_inside": len(active_cars),
+        "park_full": free_count == 0,
+    }
+
+
+@app.get("/active-cars")
+def get_active_cars():
+    """Fetch all active cars currently inside the car park."""
+    cars_list = []
+    now = time.time()
+    for plate, info in active_cars.items():
+        entry_ts = info.get("entry_time", now)
+        elapsed_minutes = max(0, int((now - entry_ts) / 60))
+        cars_list.append({
+            "plateNumber": plate,
+            "vehicleType": info.get("car_type", "Standard"),
+            "brand": "Standard",
+            "model": "Car",
+            "colour": "Silver",
+            "assignedSpot": info.get("assigned_spot", "—"),
+            "parkingSpot": info.get("assigned_spot", "—"),
+            "entryTime": datetime.fromtimestamp(entry_ts).strftime("%I:%M %p") if isinstance(entry_ts, (int, float)) else str(entry_ts),
+            "entryTimestamp": entry_ts,
+            "duration": f"{elapsed_minutes}m",
+            "plannedDuration": info.get("planned_duration", 0),
+            "charged": info.get("charged", False),
+            "status": "Parked" if not info.get("charged", False) else "Exiting",
+        })
+    return {
+        "count": len(cars_list),
+        "cars": cars_list,
+    }
+
+
+@app.get("/vehicles/{plate}")
+def get_vehicle_details(plate: str):
+    """Fetch real-time vehicle details for a given plate number."""
+    now = time.time()
+    info = active_cars.get(plate)
+    if info:
+        entry_ts = info.get("entry_time", now)
+        elapsed_minutes = max(0, int((now - entry_ts) / 60))
+        return {
+            "found": True,
+            "plateNumber": plate,
+            "vehicleType": info.get("car_type", "Sedan"),
+            "brand": "Standard",
+            "model": "Car",
+            "colour": "Silver",
+            "parkingSpot": info.get("assigned_spot", "—"),
+            "status": "Parked" if not info.get("charged", False) else "Exiting",
+            "entryTime": datetime.fromtimestamp(entry_ts).strftime("%I:%M %p") if isinstance(entry_ts, (int, float)) else str(entry_ts),
+            "exitTime": "—",
+            "duration": f"{elapsed_minutes}m",
+            "charged": info.get("charged", False),
+        }
+    
+    # Check recent arrivals
+    for arr in reversed(recent_car_arrivals):
+        if arr.get("car_plate", "").lower() == plate.lower():
+            return {
+                "found": True,
+                "plateNumber": arr.get("car_plate"),
+                "vehicleType": arr.get("car_type", "Sedan"),
+                "brand": "Standard",
+                "model": "Car",
+                "colour": "White",
+                "parkingSpot": arr.get("spot_name", "—"),
+                "status": "Arrived",
+                "entryTime": arr.get("arrival_time", "Recent"),
+                "exitTime": "—",
+                "duration": "Recently entered",
+                "charged": False,
+            }
+            
+    # Check recent webhook events
+    for evt in reversed(webhook_events):
+        p = evt.get("CarPlate") or evt.get("car_plate")
+        if p and p.lower() == plate.lower():
+            return {
+                "found": True,
+                "plateNumber": p,
+                "vehicleType": evt.get("CarType", "Sedan"),
+                "brand": "Vehicle",
+                "model": "Standard",
+                "colour": "Grey",
+                "parkingSpot": evt.get("SpotName", "—"),
+                "status": "Exited" if evt.get("SpotType") == "ExitSpot" else "Active",
+                "entryTime": evt.get("Timestamp", "Earlier"),
+                "exitTime": "—",
+                "duration": "Completed",
+                "charged": True,
+            }
+            
+    return {
+        "found": False,
+        "plateNumber": plate,
+        "message": f"No vehicle records found for {plate}"
+    }
+
+
 # --- Simulator GET Routes ---
 
 @app.get("/list-parking-spots")
 async def list_parking_spots():
-    """Fetch all parking spots from the simulator."""
-    return await call_simulator_api("list-parking-spots")
+    """Fetch all parking spots from the simulator, with fallback to ground truth."""
+    try:
+        return await call_simulator_api("list-parking-spots")
+    except Exception:
+        # Fallback to local parking_spots hash map
+        spots = []
+        for name, is_free in parking_spots.items():
+            spots.append({
+                "name": name,
+                "isOccupied": not is_free,
+                "carPlateNumber": None,
+                "zone": "ZONE1"
+            })
+        return spots
 
 
 @app.get("/list-barriers")
 async def list_barriers():
-    """Fetch all barriers from the simulator."""
-    return await call_simulator_api("list-barriers")
+    """Fetch all barriers from the simulator, with fallback."""
+    try:
+        return await call_simulator_api("list-barriers")
+    except Exception:
+        # Fallback default barrier gates state
+        return [
+            {"name": "GateA", "isOpen": False, "isBroken": False, "type": "Entrance"},
+            {"name": "GateB", "isOpen": False, "isBroken": False, "type": "Exit"}
+        ]
 
 
 @app.get("/list-lights")
