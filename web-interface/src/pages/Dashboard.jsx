@@ -429,6 +429,9 @@ function Dashboard() {
                   <p>CO Level: <strong>{reading === null ? "CO data unavailable" : `${reading} ppm`}</strong></p>
                   <p>Risk: <span className={`environment-risk environment-${riskStyle(zone.risk)}`}>{zone.risk || "Unavailable"}</span></p>
                   <p>Ventilation: <strong>{zoneFans.length ? `Fans: ${runningFans.length} / ${zoneFans.length} Running` : "Fan data unavailable"}</strong></p>
+                  <p>Auto ventilation: <strong className={zone.ventilating ? "environment-warning" : undefined}>
+                    {zone.ventilating ? `ON (${zone.fansOn?.length ? zone.fansOn.join(", ") : "starting"})` : "Off"}
+                  </strong> <small>(from {zone.ventilateFrom || "Mid"} risk until Safe)</small></p>
                   {brokenFans.map((fan) => <p className="environment-fan-issue environment-critical" key={`broken-${fan.name}`}>{fan.name}: Broken</p>)}
                   {maintenanceFans.map((fan) => <p className="environment-fan-issue environment-warning" key={`maintenance-${fan.name}`}>{fan.name}: Under Maintenance</p>)}
                   <p>Lighting: <strong>{zoneLights.length ? `Lights: ${onLights.length} / ${zoneLights.length} On` : "Light data unavailable"}</strong></p>
