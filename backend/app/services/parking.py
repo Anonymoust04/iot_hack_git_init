@@ -276,11 +276,11 @@ def record_charge(db: Session, plate: str, is_electric: bool, at: datetime | Non
     The session row is locked, so two concurrent webhooks can't both charge.
     """
     try:
+        now = at or utcnow()
         session = active_session(db, plate, lock=True)
         if session is None or session.parking_cost is not None:
             db.commit()
             return None
-        now = at or utcnow()
         charge = calculate_charge(session.entry_time, now, is_electric)
         session.exit_time = now
         session.parking_cost = Decimal(str(charge.parking_cost))

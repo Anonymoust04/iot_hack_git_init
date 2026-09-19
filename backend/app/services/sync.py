@@ -17,21 +17,23 @@ from sqlalchemy import case, select
 from sqlalchemy.dialects.mysql import insert
 from sqlalchemy.orm import Session
 
-from app.models import Event, Gate, ParkingSpot, SpotStatus
+from app.models import Event, Gate, ParkingSpot, SpotPurpose, SpotStatus
 from app.services.simulator_client import SimulatorClient
 
 log = logging.getLogger(__name__)
 
 
+def _car_count(spot: dict) -> int:
+    # The simulator sends detectedCars as a COUNT (e.g. 0, or 38 cars queued at ENTRY1), not plates
+    cars = spot.get("detectedCars") or 0
+    return len(cars) if isinstance(cars, list) else int(cars)
+
+
 def _detected_plate(spot: dict) -> str | None:
-    cars = spot.get("detectedCars") or []
-    if not cars:
-        return None
-    car = cars[0]
-    # TODO(confirm): docs show detectedCars as a list but not what one item looks like.
-    # Assuming a plate string; if it is an object, the raw text is kept (truncated) so the
-    # spot is still treated as OCCUPIED rather than wrongly FREE.
-    return car if isinstance(car, str) else str(car)[:32]
+    cars = spot.get("detectedCars")
+    if isinstance(cars, list) and cars and isinstance(cars[0], str):
+        return cars[0]
+    return None  # a count only: the plate is filled in when the car's webhook arrives
 
 
 def _spot_status(spot: dict, plate: str | None, old_status: SpotStatus | None) -> SpotStatus:
@@ -39,7 +41,7 @@ def _spot_status(spot: dict, plate: str | None, old_status: SpotStatus | None) -
         return SpotStatus.BROKEN
     if spot.get("isUnderMaintenance"):
         return SpotStatus.MAINTENANCE
-    if plate:
+    if plate or _car_count(spot):
         return SpotStatus.OCCUPIED
     if old_status == SpotStatus.RESERVED:
         return SpotStatus.RESERVED  # a car is still driving there (resync mid-level)
@@ -49,7 +51,10 @@ def _spot_status(spot: dict, plate: str | None, old_status: SpotStatus | None) -
 def upsert_parking_spots(db: Session, spots: list[dict]) -> int:
     old = dict(db.execute(select(ParkingSpot.name, ParkingSpot.status)).all())
     rows = []
+    known_purposes = {p.value for p in SpotPurpose}
     for s in spots:
+        if s.get("purpose") not in known_purposes:
+            continue  # e.g. LeaveParking (ESCAPE1...): where 'leavepark' cars go, never assigned
         plate = _detected_plate(s)
         status = _spot_status(s, plate, old.get(s["name"]))
         rows.append({
@@ -102,6 +107,10 @@ def upsert_gates(db: Session, gates: list[dict]) -> int:
     )
     db.execute(stmt)
     return len(rows)
+
+
+def has_spots(db: Session) -> bool:
+    return db.scalar(select(ParkingSpot.id).where(ParkingSpot.purpose == SpotPurpose.PARK).limit(1)) is not None
 
 
 def sync_from_simulator(db: Session, sim: SimulatorClient) -> dict:
