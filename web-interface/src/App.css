@@ -1,0 +1,1037 @@
+/* =========================
+   PARK//CONTROL
+   Global Styles
+   ========================= */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #0d0f12;
+  color: #f2f4f7;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+/* =========================
+   NAVIGATION
+   ========================= */
+
+.navigation {
+  height: 68px;
+  width: 100%;
+
+  display: flex;
+  align-items: center;
+
+  padding: 0 28px;
+
+  background: #121519;
+  border-bottom: 1px solid #292e35;
+}
+
+.navigation-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+}
+
+.brand-mark {
+  width: 32px;
+  height: 32px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  border: 1px solid #707780;
+  border-radius: 8px;
+
+  font-weight: 700;
+}
+
+.navigation-links {
+  display: flex;
+  gap: 8px;
+
+  margin-left: 50px;
+}
+
+.navigation-links a {
+  padding: 10px 16px;
+
+  color: #8f98a4;
+  text-decoration: none;
+
+  font-size: 13px;
+  letter-spacing: 1px;
+
+  border-radius: 6px;
+}
+
+.navigation-links a:hover {
+  background: #1b2026;
+  color: #ffffff;
+}
+
+.navigation-links a.active {
+  background: #242a31;
+  color: #ffffff;
+}
+
+.navigation-status {
+  margin-left: auto;
+
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  color: #8f98a4;
+
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+
+  border-radius: 50%;
+  background: #63d391;
+}
+
+/* =========================
+   PAGE CONTENT
+   ========================= */
+
+.page-content {
+  min-height: calc(100vh - 68px);
+  padding: 50px;
+}
+/* =========================
+   VEHICLE SEARCH
+   ========================= */
+
+.vehicle-search-page {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.search-header {
+  margin-bottom: 35px;
+}
+
+.search-header .eyebrow,
+.results-header .eyebrow,
+.search-panel label,
+.vehicle-result-info span {
+  color: #7f8995;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+}
+
+.search-header h1 {
+  margin: 8px 0;
+  font-size: 38px;
+  letter-spacing: -1px;
+}
+
+.search-header p {
+  margin: 0;
+  color: #8f98a4;
+}
+
+/* Search panel */
+
+.search-panel {
+  padding: 25px;
+
+  background: #121519;
+  border: 1px solid #292e35;
+  border-radius: 10px;
+
+  margin-bottom: 35px;
+}
+
+.search-panel form {
+  width: 100%;
+}
+
+.search-panel label {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.search-input-row {
+  display: flex;
+  gap: 12px;
+}
+
+.search-input-row input {
+  flex: 1;
+
+  min-width: 0;
+  padding: 14px 16px;
+
+  color: #f2f4f7;
+  background: #0d0f12;
+
+  border: 1px solid #353b43;
+  border-radius: 7px;
+
+  outline: none;
+}
+
+.search-input-row input:focus {
+  border-color: #707780;
+}
+
+.search-input-row input::placeholder {
+  color: #626b76;
+}
+
+.search-button {
+  padding: 0 24px;
+
+  border: none;
+  border-radius: 7px;
+
+  background: #f2f4f7;
+  color: #0d0f12;
+
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+
+  cursor: pointer;
+}
+
+.search-button:hover {
+  background: #d9dde2;
+}
+
+.clear-button {
+  margin-top: 14px;
+
+  padding: 0;
+
+  background: none;
+  border: none;
+
+  color: #7f8995;
+
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+
+  cursor: pointer;
+}
+
+.clear-button:hover {
+  color: #ffffff;
+}
+
+/* Results */
+
+.search-results {
+  margin-top: 20px;
+}
+
+.results-header {
+  margin-bottom: 18px;
+}
+
+.results-header h2 {
+  margin: 7px 0 0;
+
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.vehicle-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vehicle-result-card {
+  display: flex;
+  align-items: center;
+  gap: 25px;
+
+  padding: 20px;
+
+  background: #121519;
+  border: 1px solid #292e35;
+  border-radius: 10px;
+
+  transition:
+    border-color 0.2s,
+    transform 0.2s;
+}
+
+.vehicle-result-card:hover {
+  border-color: #4a515a;
+  transform: translateY(-1px);
+}
+
+.vehicle-result-main {
+  min-width: 280px;
+
+  display: flex;
+  align-items: center;
+  gap: 15px;
+}
+
+.vehicle-result-icon {
+  width: 46px;
+  height: 46px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  background: #1b2026;
+  border: 1px solid #30363e;
+  border-radius: 8px;
+
+  font-size: 20px;
+}
+
+.vehicle-result-main h3 {
+  margin: 4px 0;
+
+  font-size: 19px;
+  letter-spacing: 0.5px;
+}
+
+.vehicle-result-main p:last-child {
+  margin: 0;
+
+  color: #7f8995;
+  font-size: 13px;
+}
+
+.vehicle-result-info {
+  display: flex;
+  gap: 35px;
+
+  margin-left: auto;
+}
+
+.vehicle-result-info div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vehicle-result-info strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.details-button {
+  padding: 10px 14px;
+
+  background: transparent;
+
+  border: 1px solid #3a414a;
+  border-radius: 6px;
+
+  color: #dce0e5;
+
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.details-button:hover {
+  background: #242a31;
+  border-color: #656d77;
+}
+
+/* No results */
+
+.no-results {
+  padding: 60px 20px;
+
+  text-align: center;
+
+  background: #121519;
+  border: 1px solid #292e35;
+  border-radius: 10px;
+}
+
+.no-results-icon {
+  margin-bottom: 15px;
+
+  color: #7f8995;
+  font-size: 28px;
+}
+
+.no-results h3 {
+  margin: 0 0 8px;
+}
+
+.no-results p {
+  margin: 0 0 20px;
+
+  color: #7f8995;
+}
+
+.no-results button {
+  padding: 10px 15px;
+
+  background: transparent;
+  border: 1px solid #3a414a;
+  border-radius: 6px;
+
+  color: #dce0e5;
+
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+
+  cursor: pointer;
+}
+
+/* =========================
+   VEHICLE DETAILS
+   ========================= */
+
+.vehicle-details-page {
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+/* Header */
+
+.details-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+
+  margin-bottom: 35px;
+}
+
+.details-header h1 {
+  margin: 8px 0;
+
+  font-size: 38px;
+  letter-spacing: -1px;
+}
+
+.details-header > div > p:last-child {
+  margin: 0;
+
+  color: #8f98a4;
+}
+
+.details-header .eyebrow,
+.card-heading .eyebrow,
+.vehicle-main-info .eyebrow {
+  margin: 0;
+
+  color: #7f8995;
+
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+}
+
+.vehicle-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  padding: 8px 12px;
+
+  border: 1px solid #3b5645;
+  border-radius: 6px;
+
+  color: #82d69b;
+  background: #17221b;
+
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.vehicle-status .status-dot {
+  width: 7px;
+  height: 7px;
+}
+
+/* Cards */
+
+.details-card {
+  margin-bottom: 18px;
+
+  padding: 28px;
+
+  background: #121519;
+  border: 1px solid #292e35;
+  border-radius: 10px;
+}
+
+/* Vehicle overview */
+
+.vehicle-overview {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.vehicle-icon {
+  width: 64px;
+  height: 64px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  background: #1b2026;
+  border: 1px solid #30363e;
+  border-radius: 10px;
+
+  font-size: 28px;
+}
+
+.vehicle-main-info {
+  flex: 1;
+}
+
+.vehicle-main-info h2 {
+  margin: 6px 0;
+
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.vehicle-main-info > p:last-child {
+  margin: 0;
+
+  color: #7f8995;
+
+  font-size: 13px;
+}
+
+.plate-display {
+  min-width: 170px;
+
+  padding-left: 25px;
+
+  border-left: 1px solid #292e35;
+}
+
+.plate-display span {
+  display: block;
+
+  margin-bottom: 8px;
+
+  color: #7f8995;
+
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+}
+
+.plate-display strong {
+  font-size: 18px;
+  letter-spacing: 1px;
+}
+
+/* Card headings */
+
+.card-heading {
+  margin-bottom: 25px;
+}
+
+.card-heading h2 {
+  margin: 7px 0 0;
+
+  font-size: 20px;
+  font-weight: 600;
+}
+
+/* Details grid */
+
+.details-grid {
+  display: grid;
+
+  grid-template-columns: repeat(3, 1fr);
+
+  gap: 25px;
+}
+
+.detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detail-item span {
+  color: #7f8995;
+
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+}
+
+.detail-item strong {
+  color: #f2f4f7;
+
+  font-size: 15px;
+  font-weight: 500;
+}
+
+/* Actions */
+
+.details-actions {
+  display: flex;
+  justify-content: flex-start;
+
+  margin-top: 25px;
+}
+
+.back-button {
+  padding: 10px 14px;
+
+  background: transparent;
+
+  border: 1px solid #3a414a;
+  border-radius: 6px;
+
+  color: #dce0e5;
+
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+
+  cursor: pointer;
+}
+
+.back-button:hover {
+  background: #242a31;
+  border-color: #656d77;
+}
+/* =========================
+   ACCOUNT
+   ========================= */
+
+.account-page {
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.account-header {
+  margin-bottom: 35px;
+}
+
+.account-header h1 {
+  margin: 8px 0;
+
+  font-size: 38px;
+  letter-spacing: -1px;
+}
+
+.account-header p:last-child {
+  margin: 0;
+  color: #8f98a4;
+}
+
+/* Account cards */
+
+.account-content {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.account-card {
+  padding: 28px;
+
+  background: #121519;
+  border: 1px solid #292e35;
+  border-radius: 10px;
+}
+
+/* Profile */
+
+.profile-card {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.profile-avatar {
+  width: 64px;
+  height: 64px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  background: #1b2026;
+  border: 1px solid #3a414a;
+  border-radius: 50%;
+
+  color: #f2f4f7;
+
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.profile-info h2 {
+  margin: 0 0 5px;
+
+  font-size: 21px;
+  font-weight: 600;
+}
+
+.profile-info > p {
+  margin: 0 0 12px;
+
+  color: #7f8995;
+  font-size: 13px;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+
+  padding: 6px 10px;
+
+  background: #17221b;
+  border: 1px solid #3b5645;
+  border-radius: 5px;
+
+  color: #82d69b;
+
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.status-badge .status-dot {
+  width: 6px;
+  height: 6px;
+}
+
+/* Card headings */
+
+.card-heading {
+  margin-bottom: 25px;
+}
+
+.card-heading h2 {
+  margin: 7px 0 0;
+
+  font-size: 20px;
+  font-weight: 600;
+}
+
+/* Account details */
+
+.account-details {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+
+  border-top: 1px solid #292e35;
+}
+
+.detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  padding: 18px 0;
+
+  border-bottom: 1px solid #292e35;
+}
+
+.detail-row:nth-child(odd) {
+  margin-right: 25px;
+}
+
+.detail-row span {
+  color: #7f8995;
+
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+}
+
+.detail-row strong {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* System access */
+
+.access-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.access-card h2 {
+  margin: 7px 0;
+
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.access-card p:last-child {
+  margin: 0;
+
+  color: #7f8995;
+  font-size: 13px;
+}
+
+.role-badge {
+  padding: 10px 15px;
+
+  background: #1b2026;
+  border: 1px solid #3a414a;
+  border-radius: 6px;
+
+  color: #dce0e5;
+
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+/* Logout */
+
+.account-actions {
+  margin-top: 5px;
+}
+
+.logout-button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+
+  padding: 12px 18px;
+
+  background: transparent;
+  border: 1px solid #3a414a;
+  border-radius: 6px;
+
+  color: #dce0e5;
+
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+
+  cursor: pointer;
+}
+
+.logout-button:hover {
+  background: #242a31;
+  border-color: #656d77;
+}
+/* =========================
+   LOGIN
+   ========================= */
+
+.login-page {
+  min-height: 100vh;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  padding: 30px;
+
+  background: #0d0f12;
+}
+
+.login-panel {
+  width: 100%;
+  max-width: 460px;
+
+  padding: 40px;
+
+  background: #121519;
+  border: 1px solid #292e35;
+  border-radius: 12px;
+
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+/* Brand */
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+
+  margin-bottom: 45px;
+}
+
+.login-brand .brand-mark {
+  width: 42px;
+  height: 42px;
+
+  border-radius: 9px;
+}
+
+.login-brand h1 {
+  margin: 0;
+
+  font-size: 17px;
+  letter-spacing: 1.5px;
+}
+
+.login-brand p {
+  margin: 5px 0 0;
+
+  color: #7f8995;
+
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+
+/* Heading */
+
+.login-heading {
+  margin-bottom: 30px;
+}
+
+.login-heading .eyebrow {
+  margin: 0 0 10px;
+
+  color: #7f8995;
+
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+}
+
+.login-heading h2 {
+  margin: 0 0 8px;
+
+  font-size: 27px;
+  font-weight: 600;
+}
+
+.login-heading > p:last-child {
+  margin: 0;
+
+  color: #7f8995;
+
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Inputs */
+
+.input-group {
+  margin-bottom: 20px;
+}
+
+.input-group label {
+  display: block;
+
+  margin-bottom: 9px;
+
+  color: #7f8995;
+
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+}
+
+.input-group input {
+  width: 100%;
+
+  padding: 14px 15px;
+
+  background: #0d0f12;
+  border: 1px solid #353b43;
+  border-radius: 7px;
+
+  color: #f2f4f7;
+
+  outline: none;
+}
+
+.input-group input:focus {
+  border-color: #707780;
+}
+
+.input-group input::placeholder {
+  color: #626b76;
+}
+
+/* Login button */
+
+.login-button {
+  width: 100%;
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  margin-top: 10px;
+
+  padding: 14px 17px;
+
+  background: #f2f4f7;
+  border: none;
+  border-radius: 7px;
+
+  color: #0d0f12;
+
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+
+  cursor: pointer;
+}
+
+.login-button:hover {
+  background: #d9dde2;
+}
+
+.login-button span {
+  font-size: 17px;
+}
+
+/* Footer */
+
+.login-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+
+  margin-top: 30px;
+  padding-top: 22px;
+
+  border-top: 1px solid #292e35;
+
+  color: #7f8995;
+
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+}
