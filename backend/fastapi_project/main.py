@@ -136,6 +136,21 @@ parking_spots: dict[str, bool] = {s: True for s in VALID_PARKING_SPOTS}
 spot_lock = asyncio.Lock()
 gate_queues: dict[str, asyncio.Queue] = {g: asyncio.Queue() for g in ALL_GATES}
 
+# Physical EntrySpot occupancy. The simulator rejects a second car if it is
+# sent to ENTRY2/ENTRY3 while another car is still sitting there.
+entry_occupied: dict[str, bool] = {
+    "ENTRY1": False,
+    "ENTRY2": False,
+    "ENTRY3": False,
+}
+
+# Per-EntrySpot FIFO queue for cars waiting while the spot is occupied.
+entry_queues: dict[str, asyncio.Queue] = {
+    "ENTRY1": asyncio.Queue(),
+    "ENTRY2": asyncio.Queue(),
+    "ENTRY3": asyncio.Queue(),
+}
+entry_lock = asyncio.Lock()
 active_cars:  dict[str, dict] = {}
 charged_cars: set[str] = set()
 
@@ -234,6 +249,33 @@ async def api_send_car_to_destination(car_name: str, destination: str):
     return await call_simulator_api(f"car/{car_name}/goto/{destination}", method="POST")
 
 
+async def send_car_to_entry_or_queue(car_plate: str, entry_name: str, assigned_spot: str | None = None):
+    """
+    Send a car to an EntrySpot only when that EntrySpot is free.
+
+    If the EntrySpot is occupied, place the car in the per-EntrySpot FIFO
+    queue.  The next car is released when the current car produces an
+    EntrySpot CarOut webhook (which calls process_waiting_entry).
+    """
+
+    entry_name = (entry_name or "ENTRY1").upper()
+    if entry_name not in entry_occupied:
+        entry_name = "ENTRY1"
+
+    async with entry_lock:
+        if entry_occupied[entry_name]:
+            print(f"[ENTRY WAIT] {entry_name} occupied -> queueing {car_plate}")
+            entry_queues[entry_name].put_nowait({"car_plate": car_plate, "assigned_spot": assigned_spot})
+            return {"status": "queued", "entry": entry_name}
+        entry_occupied[entry_name] = True
+
+    try:
+        result = await api_send_car_to_destination(car_plate, entry_name)
+        return result if isinstance(result, dict) else {"status": "success", "result": result}
+    except Exception:
+        await process_waiting_entry(entry_name)
+        raise
+
 async def api_charge_car(car_name: str, parking_cost: float, charging_cost: float):
     return await call_simulator_api(f"car/{car_name}/charge", method="POST",
                                     params={"parkingCost": parking_cost, "chargingCost": charging_cost})
@@ -262,6 +304,48 @@ async def release_unparked_assignment(car_plate: str, destination: str):
             parking_spots[destination] = True
             active_cars.pop(car_plate, None)
 
+async def _redirect_entrance_car(car_plate: str, failed_gate: str, destination: str):
+    """
+    Called when `failed_gate` is blocked/broken.  Frees the already-reserved
+    spot, then finds the next operable entrance gate with a free spot and
+    re-queues the car there.  Falls back to leavepark if no alternative.
+    """
+    operable = {gate: await is_component_operable(gate) for gate in ENTRANCE_GATES if gate != failed_gate}
+    alt_spot = alt_gate = None
+    async with spot_lock:
+        car = active_cars.get(car_plate)
+        if car and not car.get("parked") and car.get("assigned_spot") == destination:
+            parking_spots[destination] = True
+            car["assigned_spot"] = None
+            car_type = normalize_vehicle_type(car.get("car_type", "Normal"))
+            eligible_types = {"Any", car_type} if car_type != "Normal" else {"Any"}
+            for gate in ENTRANCE_GATES:
+                if not operable.get(gate):
+                    continue
+                choices = sorted(
+                    (spot for spot, free in parking_spots.items()
+                     if free and spot_gate(spot) == gate and get_spot_type(spot) in eligible_types),
+                    key=extract_spot_number,
+                )
+                if choices:
+                    alt_spot, alt_gate = choices[0], gate
+                    parking_spots[alt_spot] = False
+                    car["assigned_spot"] = alt_spot
+                    break
+            if alt_spot is None:
+                active_cars.pop(car_plate, None)
+
+    if alt_spot:
+        try:
+            await send_car_to_entry_or_queue(car_plate, entry_spot_for_gate(alt_gate), alt_spot)
+            return
+        except Exception as exc:
+            print(f"[{failed_gate.upper()} FALLBACK] Redirect failed for {car_plate}: {exc}")
+            await release_unparked_assignment(car_plate, alt_spot)
+
+    print(f"[{failed_gate.upper()} FALLBACK] No usable alternative for {car_plate} -> leavepark.")
+    await api_send_car_to_destination(car_plate, "leavepark")
+
 
 async def dedicated_entrance_gate_worker(gate_name: str, queue: asyncio.Queue):
     print(f"[{gate_name.upper()} WORKER] Entrance worker started.")
@@ -269,11 +353,6 @@ async def dedicated_entrance_gate_worker(gate_name: str, queue: asyncio.Queue):
         event       = await queue.get()
         car_plate   = event.get("car_plate", "")
         destination = event.get("destination", "leavepark")
-        # for i in range(12):
-        #     if await is_component_operable(gate_name):
-        #         break
-        #     print(f"[{gate_name.upper()} SAFETY] Maintenance wait {i+1}/12 for {car_plate}...")
-        # await asyncio.sleep(1.0)
         print(f"[{gate_name.upper()} WORKER] Opening for {car_plate} -> {destination}")
         try:
             open_result = await api_open_barrier_gate(gate_name)
@@ -281,10 +360,9 @@ async def dedicated_entrance_gate_worker(gate_name: str, queue: asyncio.Queue):
             if isinstance(open_result, dict) and open_result.get("status") == "blocked":
                 print(
                     f"[{gate_name.upper()} WORKER] Gate blocked for {car_plate}; "
-                    f"releasing {destination} and sending the car away."
+                    f"trying next entrance gate."
                 )
-                await release_unparked_assignment(car_plate, destination)
-                await api_send_car_to_destination(car_plate, "leavepark")
+                await _redirect_entrance_car(car_plate, gate_name, destination)
                 continue
 
             await asyncio.sleep(0.5)
@@ -305,7 +383,33 @@ async def dedicated_exit_gate_worker(gate_name: str, queue: asyncio.Queue):
             if await is_component_operable(gate_name):
                 break
             print(f"[{gate_name.upper()} SAFETY] Maintenance wait {i+1}/12 for {car_plate}...")
-            # await asyncio.sleep(1.0)
+            await asyncio.sleep(1.0)
+
+        # If still blocked after waiting, try the next operable exit gate.
+        if not await is_component_operable(gate_name):
+            alt_exit = None
+            for g in EXIT_GATES:
+                if g != gate_name and await is_component_operable(g):
+                    alt_exit = g
+                    break
+            if alt_exit:
+                print(
+                    f"[{gate_name.upper()} WORKER] Still blocked -> redirecting "
+                    f"{car_plate} to {alt_exit}."
+                )
+                await gate_queues[alt_exit].put({"car_plate": car_plate, "gate_name": alt_exit})
+            else:
+                print(
+                    f"[{gate_name.upper()} WORKER] All exit gates blocked -> "
+                    f"sending {car_plate} leavepark directly."
+                )
+                try:
+                    await api_send_car_to_destination(car_plate, "leavepark")
+                except Exception as e:
+                    print(f"[{gate_name.upper()} WORKER ERROR] leavepark fallback: {e}")
+            queue.task_done()
+            continue
+
         print(f"[{gate_name.upper()} WORKER] Opening exit for {car_plate}")
         try:
             await api_open_barrier_gate(gate_name)
@@ -595,6 +699,42 @@ async def auto_preemptive_maintenance_worker():
 
 
 # -------------------------------------------------
+# ENTRY QUEUE DRAIN
+# -------------------------------------------------
+
+async def process_waiting_entry(entry_name: str):
+    """
+    Release one queued car after an EntrySpot becomes free.
+    """
+    q = entry_queues.get(entry_name)
+    if q is None:
+        return
+    async with entry_lock:
+        entry_occupied[entry_name] = False
+        if q.empty():
+            return
+        item = q.get_nowait()
+        entry_occupied[entry_name] = True
+    car_plate     = item["car_plate"]
+    assigned_spot = item.get("assigned_spot")
+    print(f"[ENTRY QUEUE] Releasing queued {car_plate} -> {entry_name}" +
+          (f" for {assigned_spot}" if assigned_spot else ""))
+    try:
+        await api_send_car_to_destination(car_plate, entry_name)
+    except Exception as exc:
+        print(f"[ENTRY QUEUE ERROR] {car_plate} -> {entry_name}: {exc}")
+        if assigned_spot:
+            await release_unparked_assignment(car_plate, assigned_spot)
+        try:
+            await api_send_car_to_destination(car_plate, "leavepark")
+        except Exception as leave_exc:
+            print(f"[ENTRY QUEUE ERROR] Could not release {car_plate}: {leave_exc}")
+        asyncio.create_task(process_waiting_entry(entry_name))
+    finally:
+        q.task_done()
+
+
+# -------------------------------------------------
 # BUSINESS LOGIC - CAR ENTRY
 # -------------------------------------------------
 
@@ -705,7 +845,7 @@ async def process_car_entry(data: dict):
                     await api_close_barrier_gate("gate3")
                 elif current_gate == "gate5" and (zone1_spots or zone2_spots):
                     await api_close_barrier_gate("gate5")
-                await api_send_car_to_destination(car_plate, target_entry)
+                await send_car_to_entry_or_queue(car_plate, target_entry, assigned_spot)
         else:
             print(f"[ENTRY] No spot for {car_plate} ({norm_type}) -> leavepark.")
             open_gate    = next((g for g in ENTRANCE_GATES if gate_operable.get(g)), None)
@@ -719,6 +859,9 @@ async def process_car_entry(data: dict):
 
     except Exception as e:
         print(f"[ENTRY ERROR] {car_plate}: {e}")
+        car = active_cars.get(car_plate)
+        if car and not car.get("parked") and car.get("assigned_spot"):
+            await release_unparked_assignment(car_plate, car["assigned_spot"])
 
 
 # -------------------------------------------------
@@ -921,8 +1064,15 @@ async def webhook(request: Request):
                         info["assigned_spot"] = None
                 print(f"[SENSOR] {spot_name} FREE.")
 
-    if (spot_type == "EntrySpot" or (spot_name and spot_name.upper().startswith("ENTRY"))) and direction == "CarOut":
-        asyncio.create_task(auto_close_gate_after_delay(gate_for_entry_spot(spot_name), 0.3))
+    if spot_type == "EntrySpot" or (spot_name and spot_name.upper().startswith("ENTRY")):
+        entry_name = (spot_name or "ENTRY1").upper()
+        if entry_name in entry_occupied:
+            if direction == "CarIn":
+                async with entry_lock:
+                    entry_occupied[entry_name] = True
+            elif direction == "CarOut":
+                asyncio.create_task(auto_close_gate_after_delay(gate_for_entry_spot(entry_name), 0.3))
+                asyncio.create_task(process_waiting_entry(entry_name))
 
     if (spot_type == "ExitSpot" or (spot_name and spot_name.upper().startswith("EXIT"))) and direction == "CarOut":
         if car_plate:

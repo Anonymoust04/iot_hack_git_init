@@ -55,6 +55,7 @@ def test_blocked_entrance_gate_does_not_send_car(monkeypatch):
     monkeypatch.setattr(main, "parking_spots", {"S1": False})
     monkeypatch.setattr(main, "active_cars", {"CAR-1": {"assigned_spot": "S1", "parked": False}})
     monkeypatch.setattr(main, "spot_lock", asyncio.Lock())
+    monkeypatch.setattr(main, "component_health", {})
 
     async def blocked(_):
         commands.append("open")
@@ -79,6 +80,71 @@ def test_blocked_entrance_gate_does_not_send_car(monkeypatch):
     assert commands == ["open", "goto:leavepark"]
     assert main.parking_spots["S1"] is True
     assert "CAR-1" not in main.active_cars
+
+
+def test_blocked_gate_redirects_to_compatible_free_spot(monkeypatch):
+    queue = asyncio.Queue()
+    queue.put_nowait({"car_plate": "EV-1", "destination": "S5"})
+    monkeypatch.setattr(main, "parking_spots", {"S5": False, "bay58": True, "bay36": True})
+    monkeypatch.setattr(main, "active_cars", {
+        "EV-1": {"assigned_spot": "S5", "car_type": "Electric", "parked": False},
+    })
+    monkeypatch.setattr(main, "spot_lock", asyncio.Lock())
+    monkeypatch.setattr(main, "entry_lock", asyncio.Lock())
+    monkeypatch.setattr(main, "component_health", {"gate1": {"broken": True}})
+    monkeypatch.setattr(main, "entry_occupied", {name: False for name in ("ENTRY1", "ENTRY2", "ENTRY3")})
+    monkeypatch.setattr(main, "entry_queues", {name: asyncio.Queue() for name in main.entry_occupied})
+    sent = []
+
+    async def blocked(_):
+        return {"status": "blocked"}
+
+    async def send(_, destination):
+        sent.append(destination)
+        return {"status": "success"}
+
+    monkeypatch.setattr(main, "api_open_barrier_gate", blocked)
+    monkeypatch.setattr(main, "api_send_car_to_destination", send)
+
+    async def run_one():
+        worker = asyncio.create_task(main.dedicated_entrance_gate_worker("gate1", queue))
+        await queue.join()
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(run_one())
+    assert sent == ["ENTRY2"]
+    assert main.parking_spots["S5"] is True
+    assert main.parking_spots["bay36"] is False
+    assert main.parking_spots["bay58"] is True
+    assert main.active_cars["EV-1"]["assigned_spot"] == "bay36"
+
+
+def test_occupied_entry_releases_waiting_cars_in_order(monkeypatch):
+    monkeypatch.setattr(main, "entry_lock", asyncio.Lock())
+    monkeypatch.setattr(main, "entry_occupied", {"ENTRY1": False, "ENTRY2": True, "ENTRY3": False})
+    monkeypatch.setattr(main, "entry_queues", {name: asyncio.Queue() for name in main.entry_occupied})
+    sent = []
+
+    async def send(car, destination):
+        sent.append((car, destination))
+        return {"status": "success"}
+
+    monkeypatch.setattr(main, "api_send_car_to_destination", send)
+
+    async def run_queue():
+        await main.send_car_to_entry_or_queue("CAR-1", "ENTRY2", "bay36")
+        await main.send_car_to_entry_or_queue("CAR-2", "ENTRY2", "bay37")
+        assert sent == []
+        await main.process_waiting_entry("ENTRY2")
+        await main.process_waiting_entry("ENTRY2")
+
+    asyncio.run(run_queue())
+    assert sent == [("CAR-1", "ENTRY2"), ("CAR-2", "ENTRY2")]
+    assert main.entry_queues["ENTRY2"].empty()
 
 
 def test_preventive_spot_repair_remains_available(monkeypatch):

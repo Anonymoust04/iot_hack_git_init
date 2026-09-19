@@ -5,16 +5,16 @@ This is a review, not a completion claim. The shared working tree still contains
 
 ## Merge status
 
-- Tee's fetched branch is at `b85b1ac`. It had two commits beyond the common ancestor `1974d09`; both changed only `backend/fastapi_project/main.py`. The merge conflict in that file was resolved in `level2-combined`.
+- Tee's latest fetched branch is at `40ef908`. Its simulator changes were merged into `level2-combined` in two steps.
 - A direct `HEAD..origin/lvl2_simulation_branch` diff appears to delete many Level 2 files because Tee's branch started before the combined branch. That diff is **not** the three-way merge result. Review the two Tee commits against their common ancestor instead.
-- Accepted Tee's blocked-entrance-gate check and eligibility of general `Any` spots for Electric/Accessible cars. A blocked entrance now releases its reserved spot and sends the car away. Kept the combined branch's atomic spot reservation, automatic spot maintenance, CO safety fix and tests. Tee's occupied-EntrySpot queue guard and release were commented out, so the merge kept the existing direct reroute behavior. **Occupied EntrySpot rerouting still needs a working queue and simulator test.**
+- Accepted Tee's blocked-entrance-gate recovery, general `Any` spot eligibility, occupied EntrySpot FIFO queue, and exit-gate fallback. Combined these with atomic spot reservation, vehicle-type checks during fallback, automatic spot maintenance, and the CO safety fix. A blocked entrance redirects to another operable entrance with a compatible free spot; if none exists, the car leaves. Occupied EntrySpots queue rerouted cars until `CarOut` releases them. **These paths pass focused fake-simulator tests but still need a live simulator run.**
 - Other uncommitted financial-report and frontend work was not included in the merge commit.
 
 ## Feature review for the team
 
 | Level 2 requirement | Current combined-branch status | Check before calling complete |
 | --- | --- | --- |
-| Normal car flow, three zones, multiple entrances and exits | Implemented in merged `main.py`; Tee's blocked-gate and general-spot changes are included | Run cars through every entry/exit, full-park rejection, wrong-gate rerouting, and concurrent arrivals. Complete and test an occupied-EntrySpot queue. Confirm gates close. |
+| Normal car flow, three zones, multiple entrances and exits | Implemented in merged `main.py`; Tee's blocked-gate recovery, exit fallback, and EntrySpot queue are included | Run cars through every entry/exit, full-park rejection, wrong-gate rerouting, occupied EntrySpot queue, and concurrent arrivals. Confirm gates close and blocked exit handling. |
 | Usage cycles and preventive maintenance | Gates/lights/fans tracked in memory; alarm-driven repair exists; combined branch's automatic spot repair was preserved | Add or verify spot cycles, durable history, threshold scheduling, repair outcomes, and safe operation during failures. |
 | Broken/unavailable components and dashboard | Webhooks, sync and dashboard display exist | Trigger a real failure and repair; verify simulator, database event, audit row, and UI all agree. |
 | CO control and lighting | `main.py` has CO fan and simulator-hour lighting controllers. Focused fake-simulator tests pass, including Safe fan shutdown and 05:00/06:00/17:00/18:00 light boundaries | Restart backend with merged code; verify a live high-to-Safe CO transition and both day/night light transitions. The clock comes from simulator webhooks. |
