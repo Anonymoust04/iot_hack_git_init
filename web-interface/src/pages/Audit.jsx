@@ -87,7 +87,7 @@ function Audit() {
               </tbody>
             </table>
           </div>
-        ) : <p className="audit-empty">{events.length ? "No events match this filter" : "No audit events recorded"}</p>}
+        ) : <p className="audit-empty" style={!events.length ? { textAlign: "center" } : undefined}>{events.length ? "No events match this filter" : "No audit events recorded"}</p>}
       </section>
     </div>
   );

@@ -57,7 +57,7 @@ function Penalties() {
               </tbody>
             </table>
           </div>
-        ) : <p className="penalties-empty">No penalties recorded</p>}
+        ) : <p className="penalties-empty" style={{ textAlign: "center" }}>No penalties recorded</p>}
       </section>
     </div>
   );
