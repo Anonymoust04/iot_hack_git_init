@@ -5,6 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 
 from app.models import Role
+from app.core.permissions import Permission
 
 
 class ORMModel(BaseModel):
@@ -23,12 +24,21 @@ class UserCreate(BaseModel):
     username: str
     password: str
     role: Role = Role.OPERATOR
+    permissions: list[Permission] | None = None
+
+
+class UserUpdate(BaseModel):
+    username: str | None = None
+    password: str | None = None
+    role: Role | None = None
+    permissions: list[Permission] | None = None
 
 
 class UserOut(ORMModel):
     id: int
     username: str
     role: Role
+    permissions: list[Permission]
 
 
 # ---- park state ----

@@ -5,7 +5,7 @@ from typing import Literal
 import httpx
 from fastapi import APIRouter, HTTPException, status
 
-from app.api.deps import AdminUser, DbSession, OperatorUser
+from app.api.deps import AdminUser, DbSession, FanControlUser, GateControlUser, LightControlUser, OperatorUser, RepairUser
 from app.models import GateState
 from app.services.components import set_gate_state
 from app.services.simulator_client import get_simulator
@@ -26,7 +26,7 @@ def _simulator_call(fn, *args):
 
 
 @router.post("/gates/{name}/{action}", status_code=status.HTTP_202_ACCEPTED)
-def gate_action(name: str, action: Literal["open", "close", "repair"], db: DbSession, _: OperatorUser):
+def gate_action(name: str, action: Literal["open", "close", "repair"], db: DbSession, _: GateControlUser):
     sim = get_simulator()
     _simulator_call({"open": sim.open_gate, "close": sim.close_gate, "repair": sim.repair_gate}[action], name)
     # Show the movement at once; the simulator's gate_action webhook (and the periodic sync)
@@ -44,9 +44,31 @@ def car_goto(plate: str, destination: str, _: OperatorUser):
 
 
 @router.post("/spots/{name}/repair", status_code=status.HTTP_202_ACCEPTED)
-def repair_spot(name: str, _: OperatorUser):
+def repair_spot(name: str, _: RepairUser):
     get_simulator().repair_spot(name)
     return {"spot": name, "action": "repair"}
+
+
+@router.post("/lights/{name}/{action}", status_code=status.HTTP_202_ACCEPTED)
+def light_action(name: str, action: Literal["on", "off"], _: LightControlUser):
+    _simulator_call(get_simulator().light, name, action == "on")
+    return {"light": name, "action": action}
+
+
+@router.post("/lights/group/{group}/{action}", status_code=status.HTTP_202_ACCEPTED)
+def light_group_action(group: str, action: Literal["on", "off"], _: LightControlUser):
+    _simulator_call(get_simulator().light_group, group, action == "on")
+    return {"group": group, "action": action}
+
+
+@router.post("/fans/{name}/{action}", status_code=status.HTTP_202_ACCEPTED)
+def fan_action(name: str, action: Literal["on", "off", "repair"], _: FanControlUser):
+    simulator = get_simulator()
+    if action == "repair":
+        _simulator_call(simulator.repair_fan, name)
+    else:
+        _simulator_call(simulator.fan, name, action == "on")
+    return {"fan": name, "action": action}
 
 
 @router.post("/sync")

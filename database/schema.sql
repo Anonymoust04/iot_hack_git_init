@@ -26,6 +26,20 @@ CREATE TABLE IF NOT EXISTS users (
     UNIQUE KEY uq_users_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+-- ---------------------------------------------------------------------
+-- user_permissions: explicit per-user access decisions for the dashboard.
+-- A missing set of rows means the role defaults apply (backwards compatible
+-- with existing Level 1 users). Once an admin saves permissions, all keys are
+-- present and each is explicitly allowed or denied.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS user_permissions (
+    user_id     INT UNSIGNED NOT NULL,
+    permission  VARCHAR(64)  NOT NULL,
+    enabled     BOOLEAN      NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (user_id, permission),
+    CONSTRAINT fk_user_permissions_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 
 -- ---------------------------------------------------------------------
 -- parking_spots: latest known state of every spot.

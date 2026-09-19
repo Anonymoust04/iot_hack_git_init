@@ -16,8 +16,9 @@ from app.models.gate import Gate
 from app.models.parking_session import ParkingSession
 from app.models.parking_spot import ParkingSpot
 from app.models.user import User
+from app.models.user_permission import UserPermission
 
 __all__ = [
     "CarType", "Event", "Gate", "GateState", "ParkingSession", "ParkingSpot", "PaymentStatus",
-    "Role", "SessionStatus", "SpotPurpose", "SpotStatus", "User", "utcnow",
+    "Role", "SessionStatus", "SpotPurpose", "SpotStatus", "User", "UserPermission", "utcnow",
 ]

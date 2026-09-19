@@ -33,6 +33,12 @@ function Navigation() {
           VEHICLES
         </NavLink>
 
+        {role === "ADMIN" && (
+          <NavLink to="/admin/users">
+            ADMIN
+          </NavLink>
+        )}
+
         <NavLink to="/account">
           ACCOUNT
         </NavLink>

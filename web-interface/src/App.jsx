@@ -6,7 +6,18 @@ import Dashboard from "./pages/Dashboard.jsx";
 import Account from "./pages/Account.jsx";
 import VehicleSearch from "./pages/VehicleSearch.jsx";
 import VehicleDetails from "./pages/VehicleDetails.jsx";
+import AdminUsers from "./pages/AdminUsers.jsx";
 import Layout from "./components/Layout.jsx";
+
+function AdminOnly({ children }) {
+  try {
+    const user = JSON.parse(localStorage.getItem("currentUser") || "null");
+    if (String(user?.role || "").toUpperCase() === "ADMIN") return children;
+  } catch {
+    // Redirect below when the saved session cannot be read.
+  }
+  return <Navigate to="/dashboard" replace />;
+}
 
 function App() {
   return (
@@ -53,6 +64,17 @@ function App() {
             <Layout>
               <Account />
             </Layout>
+          }
+        />
+
+        <Route
+          path="/admin/users"
+          element={
+            <AdminOnly>
+              <Layout>
+                <AdminUsers />
+              </Layout>
+            </AdminOnly>
           }
         />
 

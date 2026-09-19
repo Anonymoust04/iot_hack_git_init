@@ -1,5 +1,6 @@
 // API Service connecting the frontend to the FastAPI backend (main.py + db_hook)
-export const BACKEND_BASE = 'http://127.0.0.1:8000';
+// Use the configured backend address; local FastAPI remains the development fallback.
+export const BACKEND_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
 export const REFRESH_MS = Number(import.meta.env?.VITE_REFRESH_MS) || 5000;
 
 async function request(endpoint, options = {}) {
@@ -197,22 +198,22 @@ export async function getBarriers() {
  * Barrier gate controls
  */
 export async function openGate(gateName) {
-  return await request(`/barrier-gates/${gateName}/open`, { method: 'POST' });
+  return await request(`/api/control/gates/${encodeURIComponent(gateName)}/open`, { method: 'POST' });
 }
 
 export async function closeGate(gateName) {
-  return await request(`/barrier-gates/${gateName}/close`, { method: 'POST' });
+  return await request(`/api/control/gates/${encodeURIComponent(gateName)}/close`, { method: 'POST' });
 }
 
 export async function repairGate(gateName) {
-  return await request(`/barrier-gates/${gateName}/repair`, { method: 'POST' });
+  return await request(`/api/control/gates/${encodeURIComponent(gateName)}/repair`, { method: 'POST' });
 }
 
 /**
  * Parking Spot control
  */
 export async function repairParkingSpot(spotName) {
-  return await request(`/parking-spots/${spotName}/repair`, { method: 'POST' });
+  return await request(`/api/control/spots/${encodeURIComponent(spotName)}/repair`, { method: 'POST' });
 }
 
 /**
@@ -228,19 +229,19 @@ export async function getLights() {
 }
 
 export async function turnLightOn(name) {
-  return await request(`/lights/${encodeURIComponent(name)}/on`, { method: 'POST' });
+  return await request(`/api/control/lights/${encodeURIComponent(name)}/on`, { method: 'POST' });
 }
 
 export async function turnLightOff(name) {
-  return await request(`/lights/${encodeURIComponent(name)}/off`, { method: 'POST' });
+  return await request(`/api/control/lights/${encodeURIComponent(name)}/off`, { method: 'POST' });
 }
 
 export async function turnLightGroupOn(groupName) {
-  return await request(`/lights/group/${encodeURIComponent(groupName)}/on`, { method: 'POST' });
+  return await request(`/api/control/lights/group/${encodeURIComponent(groupName)}/on`, { method: 'POST' });
 }
 
 export async function turnLightGroupOff(groupName) {
-  return await request(`/lights/group/${encodeURIComponent(groupName)}/off`, { method: 'POST' });
+  return await request(`/api/control/lights/group/${encodeURIComponent(groupName)}/off`, { method: 'POST' });
 }
 
 /**
@@ -256,15 +257,15 @@ export async function getExhaustFans() {
 }
 
 export async function turnFanOn(name) {
-  return await request(`/exhaust-fans/${encodeURIComponent(name)}/on`, { method: 'POST' });
+  return await request(`/api/control/fans/${encodeURIComponent(name)}/on`, { method: 'POST' });
 }
 
 export async function turnFanOff(name) {
-  return await request(`/exhaust-fans/${encodeURIComponent(name)}/off`, { method: 'POST' });
+  return await request(`/api/control/fans/${encodeURIComponent(name)}/off`, { method: 'POST' });
 }
 
 export async function repairFan(name) {
-  return await request(`/exhaust-fans/${encodeURIComponent(name)}/repair`, { method: 'POST' });
+  return await request(`/api/control/fans/${encodeURIComponent(name)}/repair`, { method: 'POST' });
 }
 
 /**
@@ -416,6 +417,34 @@ export async function chargeCar(plateNumber, parkingCost = 0.0, chargingCost = 0
     `/car/${encodeURIComponent(plateNumber)}/charge?parking_cost=${parkingCost}&charging_cost=${chargingCost}`,
     { method: 'POST' }
   );
+}
+
+/**
+ * Admin-only user directory. The backend is the source of truth for roles;
+ * never keep a second editable user list in the browser.
+ */
+export async function getUsers() {
+  return request('/api/auth/users');
+}
+
+export async function createUser({ username, password, role, permissions }) {
+  return request('/api/auth/users', {
+    method: 'POST',
+    body: JSON.stringify({
+      username,
+      password,
+      role,
+      permissions,
+    }),
+  });
+}
+
+export async function updateUser(id, changes) {
+  return request(`/api/auth/users/${id}`, { method: 'PUT', body: JSON.stringify(changes) });
+}
+
+export async function deleteUser(id) {
+  return request(`/api/auth/users/${id}`, { method: 'DELETE' });
 }
 
 /**
