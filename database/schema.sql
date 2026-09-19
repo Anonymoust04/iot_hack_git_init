@@ -149,3 +149,27 @@ CREATE TABLE IF NOT EXISTS login_attempts (
     KEY ix_login_attempts_user_time (username, attempted_at),  -- "last 3 attempts of this user"
     KEY ix_login_attempts_time (attempted_at)                  -- recent / failed attempts overall
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- ---------------------------------------------------------------------
+-- audit_logs: who did what, to which component, and whether it worked
+-- (Level 2). Covers operator actions (gate open, repairs, user changes) and
+-- system actions (automation: actor NULL). Only Admin can read it.
+-- details never holds passwords or tokens (services/audit.py masks them).
+-- Written by app/services/audit.py.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    actor        VARCHAR(64)  NULL,                -- username; NULL = the system (automation)
+    action       VARCHAR(64)  NOT NULL,            -- GATE_OPEN, SPOT_REPAIR, FAN_ON, USER_CREATED...
+    target_type  VARCHAR(32)  NULL,                -- gate | spot | light | fan | user | system
+    target_name  VARCHAR(64)  NULL,                -- gateA, S12, op1...
+    success      BOOLEAN      NOT NULL DEFAULT TRUE,
+    details      JSON         NULL,
+    ip_address   VARCHAR(45)  NULL,                -- IPv4 or IPv6
+    created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY ix_audit_logs_time (created_at),                        -- newest first / by date
+    KEY ix_audit_logs_actor_time (actor, created_at),           -- "what did this user do"
+    KEY ix_audit_logs_action_time (action, created_at),         -- "all repairs today"
+    KEY ix_audit_logs_target (target_type, target_name)         -- "history of gateA"
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

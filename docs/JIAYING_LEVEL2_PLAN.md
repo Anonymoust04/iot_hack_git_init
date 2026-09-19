@@ -4,15 +4,49 @@ My area: operational event logging, login attempts, audit logs, penalties, and t
 FastAPI wiring (`main.py`, `db_hook.py`, `auth.py`) is **Zhi Hong's**: I only send him handoff snippets.
 Team rules: [LEVEL2_TASKS.md](LEVEL2_TASKS.md).
 
-## Status
+## Progress checklist
 
-| Feature | Status | Where |
-| --- | --- | --- |
-| Login attempts: record success/failure, last 3 after login | **Code done, not wired in yet** (waiting for Zhi Hong) | `services/login_attempts.py`, `routes/login_attempts.py`, `models/login_attempt.py` |
-| Audit logs | To do: **Task A** | |
-| Penalty page data | To do: **Task B** | |
-| Operational event log + daily summary data | To do: **Task C** | |
-| Handoff to Zhi Hong (all wiring in one message) | To do: **Step 4** | |
+Check items off as they're actually done (files exist, tests really passed on MySQL — not `skipped`,
+and it's committed). This is the one place to see what's left before the PR.
+
+### Step 0 — Login attempts
+- [x] Service + route + model created (`services/login_attempts.py`, `routes/login_attempts.py`, `models/login_attempt.py`)
+- [x] `login_attempts` table added to `database/schema.sql`
+- [x] Tests written (`tests/test_login_attempts.py`)
+- [x] Tests passed offline (SQLite substitute, MySQL blocked at the time)
+- [ ] Tests passed on real MySQL (phone hotspot) — rerun `pytest tests/test_login_attempts.py -v`
+- [x] Committed (`bf9fc72`)
+- [ ] Wired into `auth.py` / `db_hook.py` by Zhi Hong (handoff below, not my job)
+
+### Task A — Audit logs (agent 1)
+- [ ] Files created: `models/audit_log.py`, `services/audit.py`, `routes/audit.py`, `tests/test_audit.py`
+- [ ] `audit_logs` table appended to `database/schema.sql` (nothing else in that file touched)
+- [ ] Tests pass on `carpark_test_audit`
+- [ ] `tests/test_schema_matches_models.py` still passes (proves the appended table matches the model)
+- [ ] Reviewed: `git status` shows only this task's files
+- [ ] Committed
+- [ ] Handoff table written (where Zhi Hong should call `record_audit(...)`)
+
+### Task B — Penalties page data (agent 2)
+- [x] Files created: `services/penalties.py`, `routes/penalties.py`, `tests/test_penalties.py`
+- [x] No new table added (reads `events` where `event_type = 'PENALTY'`)
+- [x] Tests pass on `carpark_test_penalty` (6 passed)
+- [ ] Reviewed: `git status` shows only this task's files
+- [ ] Committed
+
+### Task C — Event log search + daily summary (agent 3)
+- [ ] Files created: `services/event_log.py`, `routes/event_log.py`, `tests/test_event_log.py`, `docs/EVENT_TYPES.md`
+- [ ] No new table added (reads existing `events`)
+- [ ] Tests pass on `carpark_test_events`
+- [ ] Reviewed: `git status` shows only this task's files
+- [ ] Committed
+
+### Step 4 — Handoff & PR
+- [ ] Full suite passes together: `pytest` in `backend/` (real MySQL run, not skipped)
+- [ ] One handoff message sent to Zhi Hong: login route change, router registrations, audit call sites,
+      endpoint list for Christen/Jackson
+- [ ] Pushed: `git push -u origin lvl2-db`
+- [ ] PR opened `lvl2-db → main` (merged by Zhi Hong, not by me)
 
 ---
 
