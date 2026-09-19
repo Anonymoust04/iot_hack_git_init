@@ -14,6 +14,9 @@ function Navigation() {
     // ignore
   }
 
+  const { data: status } = usePolling(getBackendStatus);
+  const isOnline = status ? status.backend === "online" : true;
+
   return (
     <nav className="navigation">
       <div className="navigation-brand">
@@ -49,8 +52,11 @@ function Navigation() {
         >
           {role}
         </span>
-        <span className="status-dot"></span>
-        <span>SYSTEM ONLINE</span>
+        <span
+          className="status-dot"
+          style={{ backgroundColor: isOnline ? "#22c55e" : "#ef4444" }}
+        ></span>
+        <span>{isOnline ? "SYSTEM ONLINE" : "SYSTEM OFFLINE"}</span>
       </div>
     </nav>
   );

@@ -1,5 +1,6 @@
 // API Service connecting the frontend to the FastAPI backend (main.py + db_hook)
-const BACKEND_BASE = 'http://127.0.0.1:8000';
+export const BACKEND_BASE = 'http://127.0.0.1:8000';
+export const REFRESH_MS = Number(import.meta.env?.VITE_REFRESH_MS) || 5000;
 
 async function request(endpoint, options = {}) {
   const token = localStorage.getItem('token');
@@ -51,6 +52,8 @@ export async function getSystemStatus() {
     };
   }
 }
+
+export const getBackendStatus = getSystemStatus;
 
 /**
  * Fetch and normalize all 30 parking spots (S1 - S30)

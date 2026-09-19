@@ -9,7 +9,18 @@ import httpx
 app = FastAPI(title="Parking Simulator Backend")
 
 import db_hook  # MySQL: login/roles, dashboard API, webhook history (see db_hook.py)
-from app.config import get_settings
+import sys
+from pathlib import Path
+_backend_dir = str(Path(__file__).resolve().parents[1])
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+try:
+    from app.config import get_settings
+except Exception:
+    class DummySettings:
+        sim_timeout_seconds = 10.0
+    def get_settings():
+        return DummySettings()
 
 db_hook.setup(app)
 
@@ -722,8 +733,23 @@ async def get_system_status():
     """Return backend status, simulator connectivity, and current counts from thread-safe parking_spots."""
     sim_online = False
     try:
-        await call_simulator_api("test")
+        data = await call_simulator_api("list-parking-spots")
         sim_online = True
+        if isinstance(data, list):
+            now = time.time()
+            async with spot_lock:
+                for s in data:
+                    s_name = s.get("name")
+                    if s_name in parking_spots:
+                        if s.get("detectedCars", 0) > 0:
+                            parking_spots[s_name] = False
+                        else:
+                            in_transit = any(
+                                info.get("assigned_spot") == s_name and (now - info.get("entry_time", 0) < 15)
+                                for info in active_cars.values()
+                            )
+                            if not in_transit:
+                                parking_spots[s_name] = True
     except Exception:
         sim_online = False
 
