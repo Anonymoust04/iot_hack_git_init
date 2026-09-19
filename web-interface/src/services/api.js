@@ -44,8 +44,8 @@ export async function getSystemStatus() {
     return {
       backend: 'offline',
       simulator: 'offline',
-      total_spots: 90,
-      available_spots: 90,
+      total_spots: 30,
+      available_spots: 30,
       occupied_spots: 0,
       cars_inside: 0,
       park_full: false,
@@ -56,62 +56,95 @@ export async function getSystemStatus() {
 export const getBackendStatus = getSystemStatus;
 
 /**
- * Fetch and normalize parking spaces reported by the simulator.
+ * Fetch and normalize all 30 parking spots (S1 - S30)
+ * Grouped into Zone 1 (S1-S10), Zone 2 (S11-S20), Zone 3 (S21-S30)
  */
 export async function getParkingSpots() {
   try {
     const data = await request('/list-parking-spots');
-    const rawList = Array.isArray(data) ? data : data?.spots || data?.data || data?.items || [];
-    if (!Array.isArray(rawList)) return [];
+    let rawList = [];
+    if (Array.isArray(data)) {
+      rawList = data;
+    } else if (data && typeof data === 'object') {
+      rawList = data.spots || data.data || data.items || [];
+    }
 
-    return rawList.filter((spot) => spot?.purpose === 'Park' && typeof spot.zoneParent === 'string').map((raw) => {
-      const isOccupied = Array.isArray(raw.detectedCars) && raw.detectedCars.length > 0;
-      const isMaintenance = raw.broken === true || raw.isUnderMaintenance === true;
+    const spotMap = new Map();
+    rawList.forEach((s) => {
+      const name = s.name || s.spotName || s.Name || s.SpotName;
+      if (name) spotMap.set(name.toUpperCase(), s);
+    });
+
+    return Array.from({ length: 30 }, (_, index) => {
+      const spotNum = index + 1;
+      const spotName = `S${spotNum}`;
+      const raw = spotMap.get(spotName) || {};
+
+      const isOccupied =
+        (typeof raw.detectedCars === 'number' && raw.detectedCars > 0) ||
+        raw.isOccupied === true ||
+        raw.IsOccupied === true ||
+        raw.occupied === true ||
+        raw.Occupied === true ||
+        raw.status === 'occupied';
+
+      const isBroken =
+        raw.broken === true ||
+        raw.isUnderMaintenance === true ||
+        raw.isBroken === true ||
+        raw.isMaintenance === true ||
+        raw.status === 'maintenance';
+
+      let status = 'free';
+      if (isBroken) {
+        status = 'maintenance';
+      } else if (isOccupied) {
+        status = 'occupied';
+      }
+
+      // All spots belong to Zone 1
+      const zone = 'Zone 1';
 
       return {
-        name: raw.name,
-        number: raw.number ?? (raw.name?.match(/^S(\d+)$/i) ? Number(raw.name.match(/^S(\d+)$/i)[1]) : null),
-        status: isMaintenance ? 'maintenance' : isOccupied ? 'occupied' : 'free',
-        zone: raw.zoneParent,
+        name: spotName,
+        number: spotNum,
+        status,
+        zone,
         plate: isOccupied ? (raw.carPlateNumber || raw.CarPlateNumber || raw.currentCar || null) : null,
-        detectedCars: raw.detectedCars,
-        parkingForCarType: raw.parkingForCarType,
-        broken: raw.broken,
-        isUnderMaintenance: raw.isUnderMaintenance,
+        detectedCars: raw.detectedCars || (isOccupied ? 1 : 0),
+        broken: isBroken,
         raw,
       };
     });
   } catch (err) {
-    console.warn('Failed to load parking spots:', err);
-    return [];
+    console.warn('Failed to load parking spots, using default grid:', err);
+    return Array.from({ length: 30 }, (_, index) => {
+      const spotNum = index + 1;
+      return {
+        name: `S${spotNum}`,
+        number: spotNum,
+        status: 'free',
+        zone: 'Zone 1',
+        plate: null,
+      };
+    });
   }
 }
 
+/**
+ * Calculate per-zone summary (Zone 1 only)
+ */
 export function calculateZoneStats(spots = []) {
-  const zones = [
-    { name: 'Zone 1', total: 0, free: 0, occupied: 0, maintenance: 0 },
-    { name: 'Zone 2', total: 0, free: 0, occupied: 0, maintenance: 0 },
-    { name: 'Zone 3', total: 0, free: 0, occupied: 0, maintenance: 0 },
-  ];
+  const zone1 = { name: 'Zone 1', total: 0, free: 0, occupied: 0, maintenance: 0 };
 
   spots.forEach((spot) => {
-    const zoneName = String(spot.zone || '').replace(/\s+/g, '').toUpperCase();
-    const zone = zones.find((z) => z.name.replace(/\s+/g, '').toUpperCase() === zoneName);
-
-    if (!zone) return;
-
-    zone.total += 1;
-
-    if (spot.status === 'free') {
-      zone.free += 1;
-    } else if (spot.status === 'occupied') {
-      zone.occupied += 1;
-    } else if (spot.status === 'maintenance') {
-      zone.maintenance += 1;
-    }
+    zone1.total += 1;
+    if (spot.status === 'free') zone1.free += 1;
+    else if (spot.status === 'occupied') zone1.occupied += 1;
+    else zone1.maintenance += 1;
   });
 
-  return zones;
+  return [zone1];
 }
 
 /**
@@ -130,9 +163,7 @@ export async function getBarriers() {
     const gateMap = new Map();
     rawList.forEach((g) => {
       const name = g.name || g.Name || g.gateName;
-      if (name && (typeof g.state === 'string' || typeof g.zoneParent === 'string')) {
-        gateMap.set(name.toUpperCase(), g);
-      }
+      if (name) gateMap.set(name.toUpperCase(), g);
     });
 
     const gateA = gateMap.get('GATEA') || {};
@@ -153,23 +184,12 @@ export async function getBarriers() {
         isOpen: gateB.isOpen === true || gateB.open === true || gateB.state === 'Open',
         isBroken: gateB.isBroken === true || gateB.broken === true,
       },
-    ].filter((gate) => gateMap.has(gate.name.toUpperCase()));
+    ];
   } catch (err) {
-    console.warn('Failed to load barrier gates:', err);
-    return [];
-  }
-}
-
-// Keep the full simulator barrier list for health counts and zone details.
-export async function getBarrierHealthData() {
-  try {
-    const data = await request('/list-barriers');
-    const barriers = Array.isArray(data) ? data : data?.barriers || data?.data || [];
-    return Array.isArray(barriers)
-      ? barriers.filter((gate) => gate && (typeof gate.state === 'string' || typeof gate.zoneParent === 'string'))
-      : [];
-  } catch {
-    return [];
+    return [
+      { name: 'GateA', title: 'Entrance Gate (Gate A)', subtitle: 'Main vehicle entrance', isOpen: false, isBroken: false },
+      { name: 'GateB', title: 'Exit Gate (Gate B)', subtitle: 'Main vehicle exit & cashier', isOpen: false, isBroken: false },
+    ];
   }
 }
 
@@ -230,22 +250,6 @@ export async function getExhaustFans() {
   try {
     const data = await request('/list-exhaust-fans');
     return Array.isArray(data) ? data : [];
-  } catch {
-    return [];
-  }
-}
-
-export async function getZones() {
-  try {
-    const data = await request('/list-zones');
-    const zones = Array.isArray(data) ? data : data?.zones || data?.data || data?.items || [];
-    return Array.isArray(zones)
-      ? zones.filter((zone) => zone && typeof zone === 'object' && zone.name).map((zone) => ({
-        name: zone.name,
-        gasCarbonMonoxideLevel: zone.gasCarbonMonoxideLevel,
-        risk: zone.risk,
-      }))
-      : [];
   } catch {
     return [];
   }
@@ -405,28 +409,6 @@ export async function getHistorySessions(plate = '') {
   } catch {
     return [];
   }
-}
-
-export async function getPenalties() {
-  // TODO: Connect when a dedicated backend penalties endpoint provides amount and resolution status.
-  return [];
-}
-
-export async function getAuditLogs() {
-  // TODO: Connect to a dedicated backend audit endpoint when available.
-  return [];
-}
-
-export async function getDailyReport(date) {
-  // TODO: Connect to a backend daily reporting endpoint when available.
-  void date;
-  return null;
-}
-
-export async function getFinancialReport(date) {
-  // TODO: Connect to a backend financial reporting endpoint when available.
-  void date;
-  return null;
 }
 
 export async function chargeCar(plateNumber, parkingCost = 0.0, chargingCost = 0.0) {

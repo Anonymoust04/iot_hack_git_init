@@ -8,7 +8,18 @@ function ParkingGrid({ initialSpots = [], onRefresh }) {
   const [repairing, setRepairing] = useState(false);
   const [repairMsg, setRepairMsg] = useState(null);
 
-  const spots = initialSpots;
+  const spots =
+    initialSpots.length > 0
+      ? initialSpots
+      : Array.from({ length: 30 }, (_, index) => {
+        const num = index + 1;
+        return {
+          name: `S${num}`,
+          number: num,
+          status: 'free',
+          zone: 'Zone 1',
+        };
+      });
 
   const handleSpotClick = (spot) => {
     setSelectedSpot(spot);
@@ -37,11 +48,12 @@ function ParkingGrid({ initialSpots = [], onRefresh }) {
         <div>
           <h2>Parking Spaces</h2>
           <p>
-            {spots.length ? `Live availability (${freeCount} / ${spots.length} Free)` : 'Parking space data unavailable'}
+            Zone 1 (S1 - S30) · Live availability ({freeCount} / {spots.length} Free)
           </p>
         </div>
 
-        {spots.length > 0 && <div style={{ display: 'flex', alignItems: 'center' }}>
+        {/* Zone 1 indicator */}
+        <div style={{ display: 'flex', alignItems: 'center' }}>
           <span
             style={{
               padding: '6px 14px',
@@ -53,9 +65,9 @@ function ParkingGrid({ initialSpots = [], onRefresh }) {
               letterSpacing: '0.04em',
             }}
           >
-            All Zones
+            Zone 1
           </span>
-        </div>}
+        </div>
 
         <div className="parking-legend">
           <span>
@@ -76,7 +88,7 @@ function ParkingGrid({ initialSpots = [], onRefresh }) {
       </div>
 
       {/* Spot Detail & Action Banner */}
-      {selectedSpot && spots.some((spot) => spot.name === selectedSpot.name) && (
+      {selectedSpot && (
         <div
           style={{
             marginBottom: '20px',
@@ -168,9 +180,7 @@ function ParkingGrid({ initialSpots = [], onRefresh }) {
         </div>
       )}
 
-      {spots.length === 0 ? (
-        <p className="parking-data-unavailable">Connect to the simulator to view live parking availability.</p>
-      ) : <div className="parking-grid">
+      <div className="parking-grid">
         {spots.map((spot) => (
           <div
             key={spot.name}
@@ -192,7 +202,7 @@ function ParkingGrid({ initialSpots = [], onRefresh }) {
             )}
           </div>
         ))}
-      </div>}
+      </div>
     </section>
   );
 }

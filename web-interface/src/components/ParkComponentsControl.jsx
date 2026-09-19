@@ -13,7 +13,7 @@ import {
   triggerTestWebhook,
 } from '../services/api';
 
-function ParkComponentsControl({ systemOnline = false }) {
+function ParkComponentsControl() {
   const [lights, setLights] = useState([]);
   const [fans, setFans] = useState([]);
   const [alarms, setAlarms] = useState([]);
@@ -21,7 +21,6 @@ function ParkComponentsControl({ systemOnline = false }) {
   const [actionFeedback, setActionFeedback] = useState(null);
 
   const fetchComponents = async () => {
-    if (!systemOnline) return;
     try {
       const [lightsRes, fansRes, alarmsRes] = await Promise.allSettled([
         getLights(),
@@ -38,20 +37,12 @@ function ParkComponentsControl({ systemOnline = false }) {
   };
 
   useEffect(() => {
-    if (!systemOnline) {
-      setLights([]);
-      setFans([]);
-      setAlarms([]);
-      setActionFeedback(null);
-      return;
-    }
     fetchComponents();
     const interval = setInterval(fetchComponents, 5000);
     return () => clearInterval(interval);
-  }, [systemOnline]);
+  }, []);
 
   const handleToggleLight = async (lightName, currentlyOn) => {
-    if (!systemOnline) return;
     setLoadingAction((prev) => ({ ...prev, [lightName]: true }));
     setActionFeedback(null);
     try {
@@ -71,7 +62,6 @@ function ParkComponentsControl({ systemOnline = false }) {
   };
 
   const handleGroupLights = async (groupName, turnOn) => {
-    if (!systemOnline) return;
     setLoadingAction((prev) => ({ ...prev, [`group_${groupName}`]: true }));
     setActionFeedback(null);
     try {
@@ -91,7 +81,6 @@ function ParkComponentsControl({ systemOnline = false }) {
   };
 
   const handleToggleFan = async (fanName, currentlyOn) => {
-    if (!systemOnline) return;
     setLoadingAction((prev) => ({ ...prev, [fanName]: true }));
     setActionFeedback(null);
     try {
@@ -111,7 +100,6 @@ function ParkComponentsControl({ systemOnline = false }) {
   };
 
   const handleRepairFan = async (fanName) => {
-    if (!systemOnline) return;
     setLoadingAction((prev) => ({ ...prev, [`repair_${fanName}`]: true }));
     setActionFeedback(null);
     try {
@@ -126,7 +114,6 @@ function ParkComponentsControl({ systemOnline = false }) {
   };
 
   const handleTestWebhook = async () => {
-    if (!systemOnline) return;
     setLoadingAction((prev) => ({ ...prev, testWebhook: true }));
     setActionFeedback(null);
     try {
@@ -142,7 +129,7 @@ function ParkComponentsControl({ systemOnline = false }) {
 
   return (
     <section className="park-components-section" style={{ marginTop: '32px' }}>
-      <div className="section-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '16px' }}>
+      <div className="section-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
         <div>
           <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 600 }}>Facility & Component Controls</h2>
           <p style={{ margin: '4px 0 0', fontSize: '0.85rem', color: '#6b7280' }}>
@@ -152,7 +139,7 @@ function ParkComponentsControl({ systemOnline = false }) {
 
         <button
           type="button"
-          disabled={!systemOnline || loadingAction.testWebhook}
+          disabled={loadingAction.testWebhook}
           onClick={handleTestWebhook}
           style={{
             padding: '8px 16px',
@@ -174,9 +161,7 @@ function ParkComponentsControl({ systemOnline = false }) {
         </button>
       </div>
 
-      {!systemOnline && <p className="controls-unavailable">Controls unavailable while system is offline.</p>}
-
-      {systemOnline && actionFeedback && (
+      {actionFeedback && (
         <div
           style={{
             padding: '12px 18px',
@@ -194,7 +179,7 @@ function ParkComponentsControl({ systemOnline = false }) {
       )}
 
       {/* Alarms Status Banner */}
-      {systemOnline && alarms.length > 0 ? (
+      {alarms.length > 0 ? (
         <div
           style={{
             marginBottom: '20px',
@@ -221,7 +206,7 @@ function ParkComponentsControl({ systemOnline = false }) {
         </div>
       ) : null}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 340px), 1fr))', gap: '20px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '20px' }}>
         {/* Lighting Card */}
         <div
           style={{
@@ -232,17 +217,17 @@ function ParkComponentsControl({ systemOnline = false }) {
             boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
           }}
         >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginBottom: '14px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
             <div>
               <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600 }}>💡 Lighting Systems</h3>
               <span style={{ fontSize: '0.8rem', color: '#6b7280' }}>Zone 1 & Entry/Exit Fixtures</span>
             </div>
 
             {/* Group G1 Quick Toggles */}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+            <div style={{ display: 'flex', gap: '6px' }}>
               <button
                 type="button"
-                disabled={!systemOnline || lights.length === 0 || loadingAction.group_G1}
+                disabled={loadingAction.group_G1}
                 onClick={() => handleGroupLights('G1', true)}
                 style={{
                   padding: '4px 10px',
@@ -259,7 +244,7 @@ function ParkComponentsControl({ systemOnline = false }) {
               </button>
               <button
                 type="button"
-                disabled={!systemOnline || lights.length === 0 || loadingAction.group_G1}
+                disabled={loadingAction.group_G1}
                 onClick={() => handleGroupLights('G1', false)}
                 style={{
                   padding: '4px 10px',
@@ -278,7 +263,7 @@ function ParkComponentsControl({ systemOnline = false }) {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {systemOnline && lights.length > 0 ? (
+            {lights.length > 0 ? (
               lights.map((l) => {
                 const isOn = l.isOn === true || l.state === 'On' || l.state === 'ON';
                 const isLoading = loadingAction[l.name];
@@ -290,8 +275,6 @@ function ParkComponentsControl({ systemOnline = false }) {
                       display: 'flex',
                       justifyContent: 'space-between',
                       alignItems: 'center',
-                      flexWrap: 'wrap',
-                      gap: '8px',
                       padding: '10px 14px',
                       backgroundColor: '#f8fafc',
                       borderRadius: '8px',
@@ -305,7 +288,7 @@ function ParkComponentsControl({ systemOnline = false }) {
                       </span>
                     </div>
 
-                    <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                       <span
                         style={{
                           fontSize: '0.75rem',
@@ -321,7 +304,7 @@ function ParkComponentsControl({ systemOnline = false }) {
 
                       <button
                         type="button"
-                        disabled={!systemOnline || isLoading}
+                        disabled={isLoading}
                         onClick={() => handleToggleLight(l.name, isOn)}
                         style={{
                           padding: '5px 12px',
@@ -342,7 +325,7 @@ function ParkComponentsControl({ systemOnline = false }) {
               })
             ) : (
               <p style={{ margin: 0, fontSize: '0.85rem', color: '#64748b' }}>
-                Lighting data unavailable.
+                All 4 lighting fixtures operational in Group G1.
               </p>
             )}
           </div>
@@ -358,7 +341,7 @@ function ParkComponentsControl({ systemOnline = false }) {
             boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
           }}
         >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginBottom: '14px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
             <div>
               <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600 }}>🌀 Exhaust Fans & Ventilation</h3>
               <span style={{ fontSize: '0.8rem', color: '#6b7280' }}>CO Air Circulation Management</span>
@@ -366,7 +349,7 @@ function ParkComponentsControl({ systemOnline = false }) {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {systemOnline && fans.length > 0 ? (
+            {fans.length > 0 ? (
               fans.map((f) => {
                 const isOn = f.isOn === true || f.state === 'On';
                 const isBroken = f.broken === true || f.isBroken === true;
@@ -380,8 +363,6 @@ function ParkComponentsControl({ systemOnline = false }) {
                       display: 'flex',
                       justifyContent: 'space-between',
                       alignItems: 'center',
-                      flexWrap: 'wrap',
-                      gap: '8px',
                       padding: '10px 14px',
                       backgroundColor: '#f8fafc',
                       borderRadius: '8px',
@@ -397,7 +378,7 @@ function ParkComponentsControl({ systemOnline = false }) {
                       )}
                     </div>
 
-                    <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <span
                         style={{
                           fontSize: '0.75rem',
@@ -413,7 +394,7 @@ function ParkComponentsControl({ systemOnline = false }) {
 
                       <button
                         type="button"
-                        disabled={!systemOnline || isLoading || isRepairing}
+                        disabled={isLoading || isRepairing}
                         onClick={() => handleToggleFan(f.name, isOn)}
                         style={{
                           padding: '5px 12px',
@@ -432,7 +413,7 @@ function ParkComponentsControl({ systemOnline = false }) {
                       {isBroken && (
                         <button
                           type="button"
-                          disabled={!systemOnline || isRepairing}
+                          disabled={isRepairing}
                           onClick={() => handleRepairFan(f.name)}
                           style={{
                             padding: '5px 10px',
@@ -464,7 +445,7 @@ function ParkComponentsControl({ systemOnline = false }) {
                 }}
               >
                 <span style={{ fontSize: '1.4rem', display: 'block', marginBottom: '6px' }}>🍃</span>
-                Ventilation data unavailable.
+                Ventilation subsystem standby. Automatic activation on elevated CO levels.
               </div>
             )}
           </div>

@@ -24,15 +24,13 @@ input {
    ========================= */
 
 .navigation {
-  min-height: 68px;
+  height: 68px;
   width: 100%;
 
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 8px 16px;
 
-  padding: 10px 28px;
+  padding: 0 28px;
 
   background: #121519;
   border-bottom: 1px solid #292e35;
@@ -64,9 +62,7 @@ input {
 
 .navigation-links {
   display: flex;
-  flex-wrap: wrap;
   gap: 8px;
-  min-width: 0;
 
   margin-left: 50px;
 }
@@ -99,7 +95,6 @@ input {
   display: flex;
   align-items: center;
   gap: 8px;
-  white-space: nowrap;
 
   color: #8f98a4;
 
@@ -122,41 +117,6 @@ input {
 .page-content {
   min-height: calc(100vh - 68px);
   padding: 50px;
-}
-
-@media (max-width: 1250px) {
-  .navigation-brand {
-    order: 1;
-  }
-
-  .navigation-status {
-    order: 2;
-  }
-
-  .navigation-links {
-    order: 3;
-    flex-basis: 100%;
-    margin-left: 0;
-  }
-}
-
-@media (max-width: 700px) {
-  .navigation {
-    padding: 10px 20px;
-  }
-
-  .navigation-links {
-    gap: 4px;
-  }
-
-  .navigation-links a {
-    padding: 8px 10px;
-    font-size: 12px;
-  }
-
-  .page-content {
-    padding: 24px;
-  }
 }
 /* =========================
    VEHICLE SEARCH
@@ -1126,35 +1086,4 @@ input {
   background: #242a31;
   color: #ffffff !important;
   border-color: #8f98a4;
-}
-
-@media (max-width: 700px) {
-  .vehicle-result-card,
-  .details-header,
-  .vehicle-overview,
-  .profile-card,
-  .access-card {
-    flex-wrap: wrap;
-  }
-
-  .vehicle-result-main {
-    min-width: 0;
-  }
-
-  .vehicle-result-info {
-    flex-wrap: wrap;
-    margin-left: 0;
-    gap: 12px 24px;
-  }
-
-  .details-grid,
-  .account-details {
-    grid-template-columns: 1fr;
-  }
-
-  .plate-display {
-    min-width: 0;
-    padding-left: 0;
-    border-left: 0;
-  }
 }
