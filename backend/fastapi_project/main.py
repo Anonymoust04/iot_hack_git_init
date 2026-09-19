@@ -11,7 +11,7 @@ Key behaviours
 - Vehicle-type-aware spot selection (Electric -> EV spots, Accessible -> Accessible spots)
 - Re-entry guard: rerouted cars arriving at the correct gate are let through immediately
 - Fee charged only after the car has confirmed physically parked (Park/CarIn event)
-- CO risk Mid/High/Critical in a zone -> its working fans ON; back to Safe -> OFF (webhooks + list-zones check)
+- CO risk Mid/High/Critical or high numeric CO -> working fans ON; Safe and low CO -> OFF
 - Day/Night light control (daytime 06:00-18:00 -> lights OFF; night -> lights ON)
 - Preventive maintenance: polls list-alarms every 5 s and repairs idle components
 - Usage cycle tracking: polls every 30 s and logs component cycle counts
@@ -306,7 +306,8 @@ async def dedicated_exit_gate_worker(gate_name: str, queue: asyncio.Queue):
 
 # The simulator rates each zone's CO itself: Safe < Mid < High < Critical (webhook "DangerLevel",
 # list-zones "risk"). It only sends CO webhooks from Mid upward; ~50 ppm is Mid (hackathon docs).
-# Rule: Mid / High / Critical -> every working fan in that zone ON; back to Safe -> those fans OFF.
+# A stale Safe label with a high numeric reading still needs ventilation. Fans turn off when
+# both the risk and the numeric reading are below Mid.
 CO_RISK_ORDER      = {"Safe": 0, "Mid": 1, "High": 2, "Critical": 3}
 CO_VENTILATE_FROM  = "Mid"
 CO_MID_PPM         = 50.0   # only used if a reading arrives without a risk label
@@ -318,9 +319,9 @@ _co_lock = asyncio.Lock()
 
 
 def co_needs_ventilation(risk: str | None, ppm: float | None) -> bool:
-    if risk in CO_RISK_ORDER:
-        return CO_RISK_ORDER[risk] >= CO_RISK_ORDER[CO_VENTILATE_FROM]
-    return ppm is not None and ppm >= CO_MID_PPM
+    rated_high = CO_RISK_ORDER.get(str(risk).strip().title(), 0) >= CO_RISK_ORDER[CO_VENTILATE_FROM]
+    measured_high = ppm is not None and ppm >= CO_MID_PPM
+    return rated_high or measured_high
 
 
 async def audit_system(action: str, target_type: str, target_name: str, success: bool = True, **details):
@@ -349,7 +350,7 @@ async def ventilate_zone(zone_name: str, on: bool, risk=None, ppm=None):
     try:
         fans = await call_simulator_api("list-exhaust-fans")
         if not isinstance(fans, list):
-            return
+            return False
         target = [
             f for f in fans
             if str(f.get("zoneParent") or "").upper() == zone_name.upper()
@@ -363,7 +364,7 @@ async def ventilate_zone(zone_name: str, on: bool, risk=None, ppm=None):
         if not target:
             if on and not zone_fans:
                 print(f"[CO VENTILATION] No fans in {zone_name}.")
-            return
+            return True
         names = [f["name"] for f in target]
         print(f"[CO VENTILATION] {zone_name} ({risk}, {ppm} ppm): fans {'ON' if on else 'OFF'} {names}")
         results = await asyncio.gather(*[
@@ -374,8 +375,10 @@ async def ventilate_zone(zone_name: str, on: bool, risk=None, ppm=None):
             print(f"[CO VENTILATION ERROR] {n}: {err}")
         zone_co.setdefault(zone_name, {})["fans_on"] = [n for n in names if n not in failed] if on else []
         asyncio.create_task(_audit_fans(zone_name, "AUTO_FAN_ON" if on else "AUTO_FAN_OFF", names, risk, ppm, failed))
+        return not failed
     except Exception as e:
         print(f"[CO VENTILATION ERROR] {zone_name}: {e}")
+        return False
 
 
 async def update_zone_co(zone_name: str, ppm, risk):
@@ -390,12 +393,17 @@ async def update_zone_co(zone_name: str, ppm, risk):
     async with _co_lock:
         state = zone_co.setdefault(zone_name, {"ventilating": False, "fans_on": []})
         was = state.get("ventilating", False)
+        needs_safe_check = not state.get("safe_reconciled", False)
         state.update(ppm=ppm, risk=risk, updated=time.time(), ventilating=need)
-    if need:
-        # also re-run while ventilating: a fan repaired / turned off by maintenance goes back ON
-        await ventilate_zone(zone_name, True, risk, ppm)
-    elif was:
-        await ventilate_zone(zone_name, False, risk, ppm)
+        if need:
+            state["safe_reconciled"] = False
+        if need:
+            # also re-run while ventilating: a fan repaired / turned off by maintenance goes back ON
+            await ventilate_zone(zone_name, True, risk, ppm)
+        elif was or needs_safe_check:
+            # Reconcile once even after a restart: an already-running fan must turn off at Safe.
+            if await ventilate_zone(zone_name, False, risk, ppm):
+                state["safe_reconciled"] = True
 
 
 async def co_monitor_worker():
