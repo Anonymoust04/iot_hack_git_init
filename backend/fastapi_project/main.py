@@ -258,18 +258,17 @@ async def dedicated_entrance_gate_worker(gate_name: str, queue: asyncio.Queue):
         event       = await queue.get()
         car_plate   = event.get("car_plate", "")
         destination = event.get("destination", "leavepark")
-        for i in range(12):
-            if await is_component_operable(gate_name):
-                break
-            print(f"[{gate_name.upper()} SAFETY] Maintenance wait {i+1}/12 for {car_plate}...")
-            await asyncio.sleep(1.0)
+        # for i in range(12):
+        #     if await is_component_operable(gate_name):
+        #         break
+        #     print(f"[{gate_name.upper()} SAFETY] Maintenance wait {i+1}/12 for {car_plate}...")
+        # await asyncio.sleep(1.0)
         print(f"[{gate_name.upper()} WORKER] Opening for {car_plate} -> {destination}")
         try:
             await api_open_barrier_gate(gate_name)
+            await asyncio.sleep(1)
             await api_send_car_to_destination(car_plate, destination)
-            await asyncio.sleep(1.2)
-            if queue.empty():
-                await api_close_barrier_gate(gate_name)
+            await api_close_barrier_gate(gate_name)
         except Exception as e:
             print(f"[{gate_name.upper()} WORKER ERROR] {car_plate}: {e}")
         finally:
@@ -285,12 +284,12 @@ async def dedicated_exit_gate_worker(gate_name: str, queue: asyncio.Queue):
             if await is_component_operable(gate_name):
                 break
             print(f"[{gate_name.upper()} SAFETY] Maintenance wait {i+1}/12 for {car_plate}...")
-            await asyncio.sleep(1.0)
+            # await asyncio.sleep(1.0)
         print(f"[{gate_name.upper()} WORKER] Opening exit for {car_plate}")
         try:
             await api_open_barrier_gate(gate_name)
             await api_send_car_to_destination(car_plate, "leavepark")
-            await asyncio.sleep(1.2)
+            # await asyncio.sleep(1.2)
             if queue.empty():
                 await api_close_barrier_gate(gate_name)
         except Exception as e:
@@ -1202,7 +1201,8 @@ async def car_goto(name: str, destination: str):
 @app.post("/car/{name}/charge")
 async def car_charge(name: str, parking_cost: float = 0.0, charging_cost: float = 0.0):
     return await api_charge_car(name, parking_cost, charging_cost)
-p.post("/exhaust-fans/{name}/on")
+
+@app.post("/exhaust-fans/{name}/on")
 async def turn_on_exhaust_fan(name: str):
     """Turn on an exhaust fan by name."""
     return await call_simulator_api(f"exhaust-fans/{name}/on", method="POST")
@@ -1231,10 +1231,8 @@ async def car_charge(name: str, parking_cost: float = 0.0, charging_cost: float 
     """Charge a car with optional parking and charging cost query parameters."""
     return await api_charge_car(name, parking_cost, charging_cost)
 
-
-
         
-p.post("/exhaust-fans/{name}/on")
+@app.post("/exhaust-fans/{name}/on")
 async def turn_on_exhaust_fan(name: str):
     """Turn on an exhaust fan by name."""
     return await call_simulator_api(f"exhaust-fans/{name}/on", method="POST")
