@@ -1,3 +1,10 @@
+
+# Simulator Executable & Settings Directory
+ParkingSimulator-win-x64/
+*.exe
+*.dll
+*.db
+.env
 # Secrets
 .env
 .env.*
