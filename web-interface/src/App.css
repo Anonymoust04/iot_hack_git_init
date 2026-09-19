@@ -1037,8 +1037,11 @@ input {
   letter-spacing: 1.5px;
 }
 
-/* Keep Account page text visible on dark background */
+/* =========================
+   COMBINED FRONTEND FIXES
+   ========================= */
 
+/* Account page text */
 .account-page h1,
 .account-page h2,
 .account-page h3,
@@ -1046,26 +1049,41 @@ input {
   color: #f2f4f7;
 }
 
-.profile-info h2 {
-  color: #f2f4f7;
-}
-
-.card-heading h2 {
-  color: #f2f4f7;
-}
-
+.profile-info h2,
+.card-heading h2,
+.access-card h2,
 .detail-row strong {
   color: #f2f4f7;
 }
 
-.access-card h2 {
-  color: #f2f4f7;
-}
-
-.results-header h2 {
-  color: #f2f4f7;
-}
-
+/* Vehicle search text */
+.results-header h2,
 .no-results h3 {
   color: #f2f4f7;
+}
+
+/* Login page text */
+.login-brand h1,
+.login-heading h2,
+.login-brand .brand-mark {
+  color: #f2f4f7;
+}
+
+/* System Access label */
+.access-card .eyebrow {
+  color: #8f98a4;
+}
+
+/* Logout button */
+.account-actions .logout-button {
+  background: #121519;
+  color: #f2f4f7 !important;
+  border: 1px solid #707780;
+  opacity: 1;
+}
+
+.account-actions .logout-button:hover {
+  background: #242a31;
+  color: #ffffff !important;
+  border-color: #8f98a4;
 }
