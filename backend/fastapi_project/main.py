@@ -389,7 +389,7 @@ async def process_car_exit(data: dict):
         print(f"[EXIT LOGIC] Payment verified for {car_plate}. Notifying Gate B worker thread for gate {target_gate}...")
         await gate_b_queue.put({
             "car_plate": car_plate,
-            "gate_name": target_gate,
+            "gate_name": "GateB",
         })
     else:
         print(f"[EXIT LOGIC] Payment NOT verified for {car_plate}. Gate {spot_name} remains CLOSED.")
