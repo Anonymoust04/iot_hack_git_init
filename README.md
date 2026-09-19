@@ -9,6 +9,24 @@ to spots, charges them at the exit, and shows live status on a dashboard.
 - **Level 1 brief and progress checklist:** [docs/LEVEL1.md](docs/LEVEL1.md)
 - **Database tables, queries, webhook handling:** [database/README.md](database/README.md)
 
+## Run it
+
+1. **Backend** (terminal 1): follow [backend/README.md](backend/README.md), then
+   `cd backend\fastapi_project` → `uvicorn main:app --reload` (http://127.0.0.1:8000).
+2. **Frontend** (terminal 2):
+   ```powershell
+   cd web-interface
+   copy .env.example .env      # VITE_API_BASE_URL = the backend address, VITE_REFRESH_MS = refresh rate
+   npm install
+   npm run dev
+   ```
+   Open http://localhost:5173 and log in with the backend admin (`BOOTSTRAP_ADMIN_USERNAME` /
+   `BOOTSTRAP_ADMIN_PASSWORD` in the root `.env`). Create Operator accounts in http://127.0.0.1:8000/docs
+   → `POST /api/auth/users`.
+
+   If the browser shows a CORS error, add the frontend's address to `CORS_ORIGINS` in the root `.env`
+   and restart the backend.
+
 ## How it fits together
 
 ```

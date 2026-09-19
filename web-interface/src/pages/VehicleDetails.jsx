@@ -1,26 +1,45 @@
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
+import { usePolling } from "../hooks/usePolling";
+import { getVehicle } from "../services/api";
 
 function VehicleDetails() {
     const navigate = useNavigate();
-  // Temporary vehicle data.
-  // This will be replaced with data from the backend later.
-  const vehicle = {
-    plateNumber: "WXY 1234",
-    vehicleType: "Sedan",
-    brand: "Toyota",
-    model: "Corolla",
-    colour: "White",
+  // The plate from the URL (/vehicles/:plateNumber); its latest visit, kept live
+  const { plateNumber } = useParams();
+  const { data, error } = usePolling(
+    async () => ({ vehicle: await getVehicle(plateNumber) }),
+    [plateNumber]
+  );
+  const vehicle = data?.vehicle;
 
-    status: "Parked",
-    parkingSpot: "S12",
+  if (!vehicle) {
+    return (
+      <div className="vehicle-details-page">
+        <div className="details-header">
+          <div>
+            <p className="eyebrow">VEHICLE RECORD</p>
+            <h1>{plateNumber}</h1>
+            <p>
+              {error
+                ? `Could not load this vehicle: ${error.message}`
+                : data === null
+                  ? "Loading parking record..."
+                  : "No parking record for this number plate."}
+            </p>
+          </div>
+        </div>
 
-    entryTime: "09:42 AM",
-    exitTime: "—",
+        <div className="details-actions">
+          <button type="button"
+          className="back-button"
+          onClick={() => navigate("/vehicles")}>
+            ← BACK TO SEARCH
+          </button>
+        </div>
+      </div>
+    );
+  }
 
-    duration: "2h 18m",
-  };
-
-  
   return (
     <div className="vehicle-details-page">
       {/* Page Header */}

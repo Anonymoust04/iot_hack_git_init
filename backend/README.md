@@ -118,7 +118,8 @@ If MySQL is unreachable, the car flow still runs; only login and the dashboard A
 
 ### 7. Try It
 
-1. Open **http://127.0.0.1:8000/docs**, click **Authorize**, log in with the bootstrap admin.
+1. Open **http://127.0.0.1:8000/docs**, click **Authorize**, and enter a dashboard account's **username** and **password**. The first admin account is seeded from `BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP_ADMIN_PASSWORD` in `.env`; changing those settings later does not reset an existing account. Swagger sends the credentials as form fields to `/api/auth/login` and adds the returned bearer token to `/api/control` requests.
+   The simulator's `POST http://127.0.0.1:9898/api/v1/auth/login` uses JSON `email`/`password` and issues a different token; do not paste that token into this Authorize dialog.
 2. `GET /api/dashboard`: free / occupied spots per zone and gate states.
 3. Let cars arrive in the simulator, then `GET /recent-arrivals` or `GET /api/history/sessions`.
 
@@ -136,7 +137,7 @@ Tests use a separate database `carpark_test` (auto-created and wiped), never you
 
 ## 📡 API Endpoints Overview
 
-Everything under `/api/` (except login) needs a logged-in user (**Authorize** in `/docs`). The simulator routes from `main.py` (`/list-*`, `/barrier-gates/...`, `/car/...`) are open.
+Everything under `/api/` (except login) needs a logged-in dashboard user (**Authorize** in `/docs`). The simulator routes from `main.py` (`/list-*`, `/barrier-gates/...`, `/car/...`) are open to the caller; the backend logs in to the simulator using `SIM_EMAIL` and `SIM_PASSWORD` and refreshes its simulator token when needed.
 
 | Endpoint | Method | Who | Description |
 | :--- | :--- | :--- | :--- |

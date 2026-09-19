@@ -9,6 +9,8 @@ import httpx
 app = FastAPI(title="Parking Simulator Backend")
 
 import db_hook  # MySQL: login/roles, dashboard API, webhook history (see db_hook.py)
+from app.config import get_settings
+
 db_hook.setup(app)
 
 # Configuration constants
@@ -260,11 +262,11 @@ async def call_simulator_api(
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=get_settings().sim_timeout_seconds) as client:
             response = await client.request(
                 method=method,
                 url=url,
-                headers=headers,
+                headers={"Authorization": f"Bearer {token}"},
                 params=params,
                 json=json_data,
             )
@@ -298,6 +300,7 @@ async def call_simulator_api(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Could not connect to Parking Simulator at {SIMULATOR_URL}. Is the simulator running?"
         )
+
 
 
 async def api_get_available_spots() -> list:

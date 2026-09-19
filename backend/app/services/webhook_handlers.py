@@ -105,8 +105,11 @@ def receive(db: Session, body: bytes) -> tuple[dict, str | None]:
         payload = sig_fields = {"raw": payload}
     plate = payload.get("CarPlateNumber")
 
-    # integrity: fake payments fail this
-    if get_settings().webhook_verify_signature and not signature_is_valid(sig_fields):
+    # integrity: a wrong signature is always rejected; a missing one only if required
+    settings = get_settings()
+    unsigned = sig_fields.get("Signature") in (None, "")
+    check = settings.webhook_verify_signature and (settings.webhook_require_signature or not unsigned)
+    if check and not signature_is_valid(sig_fields):
         log.warning("Bad webhook signature: %s", payload)
         # no event_id here: a forged copy must not block the real event with the same EventId
         log_event(db, "WEBHOOK_BAD_SIGNATURE", car_plate=plate, raw_data=payload)
@@ -143,13 +146,19 @@ def receive(db: Session, body: bytes) -> tuple[dict, str | None]:
 def on_car_spot_action(db: Session, payload: dict) -> None:
     plate = payload["CarPlateNumber"]
     spot_type, direction = payload.get("SpotType"), payload.get("Direction")
-    if spot_type == "Park" and direction == "CarIn":
+    if _is_spot(payload, "EntrySpot", "ENTRY") and direction == "CarIn":
+        parking.record_arrival(db, plate, car_type(payload), raw_data=payload, at=server_time(payload))
+    elif _is_spot(payload, "EntrySpot", "ENTRY") and direction == "CarOut":
+        # drove through the entrance: now inside (before this it was queuing outside)
+        log_event(db, "CAR_ENTERED", car_plate=plate, raw_data=payload)
+        db.commit()
+    elif spot_type == "Park" and direction == "CarIn":
         parking.mark_parked(db, plate, payload["SpotName"], raw_data=payload, at=server_time(payload))
     elif spot_type == "Park" and direction == "CarOut":
         parking.mark_leaving_spot(db, plate, raw_data=payload)  # frees the spot for the next car now
-    elif _is_spot(payload, "ExitSpot", "EXIT") and direction == "CarOut":
-        parking.complete_departure(db, plate, raw_data=payload)
-    # EntrySpot/CarOut (car drove into the park) needs no action: the raw WEBHOOK row records it.
+    elif (_is_spot(payload, "ExitSpot", "EXIT") and direction == "CarOut") or spot_type == "LeaveParking":
+        # left through the exit, or sent away ('leavepark' when full) without parking
+        parking.complete_departure(db, plate, raw_data=payload, at=server_time(payload))
 
 
 def on_payment_made(db: Session, payload: dict) -> bool:

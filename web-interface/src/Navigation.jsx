@@ -1,6 +1,10 @@
 import { NavLink } from "react-router-dom";
+import { usePolling } from "./hooks/usePolling";
+import { getBackendStatus } from "./services/api";
 
 function Navigation() {
+  const { data: backendOnline } = usePolling(getBackendStatus);
+
   return (
     <nav className="navigation">
       <div className="navigation-brand">
@@ -26,7 +30,7 @@ function Navigation() {
 
       <div className="navigation-status">
         <span className="status-dot"></span>
-        SYSTEM ONLINE
+        {backendOnline ? "SYSTEM ONLINE" : "SYSTEM OFFLINE"}
       </div>
     </nav>
   );

@@ -12,10 +12,13 @@ webhooks are stored by a separate background worker, and database errors are onl
 import asyncio
 import logging
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import OperationalError
 
 # backend/ holds the `app` package (models, services, API routes)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,6 +27,7 @@ from app.api.routes import auth, control, dashboard, history  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.db.init_db import apply_schema, check_schema, seed_admin  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
+from app.services import parking  # noqa: E402
 from app.services import webhook_handlers as webhooks  # noqa: E402
 from app.services.simulator_client import get_simulator  # noqa: E402
 from app.services.sync import has_spots, sync_from_simulator  # noqa: E402
@@ -36,14 +40,25 @@ def setup(app: FastAPI) -> None:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=get_settings().cors_origin_list,
+        allow_origin_regex=get_settings().cors_origin_regex or None,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
     for r in (auth.router, dashboard.router, control.router, history.router):
         app.include_router(r)
+    app.add_exception_handler(OperationalError, _database_unreachable)
     app.add_api_route("/health", lambda: {"status": "ok"}, methods=["GET"], tags=["meta"])
     app.add_event_handler("startup", _startup)
+
+
+async def _database_unreachable(request: Request, exc: OperationalError) -> JSONResponse:
+    """MySQL down or blocked (e.g. venue Wi-Fi): tell the frontend why, instead of a bare 500."""
+    log.error("MySQL unreachable during %s %s: %s", request.method, request.url.path, exc.orig)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database unreachable: check the network (use a phone hotspot) and the DB_* settings in .env."},
+    )
 
 
 async def record(request: Request) -> None:
@@ -64,7 +79,29 @@ async def _startup() -> None:
         print(f"[DB] MySQL not ready, dashboard/login won't work (use a phone hotspot?): {e}")
         return
     asyncio.create_task(_worker())
-    await asyncio.to_thread(_sync_if_empty)
+    await asyncio.to_thread(_sync_now)
+    if get_settings().sim_sync_seconds > 0:
+        asyncio.create_task(_sync_loop(get_settings().sim_sync_seconds))
+
+
+async def _sync_loop(every: float) -> None:
+    """Keep spots + gates equal to the simulator's own view (SIM_SYNC_SECONDS), on top of webhooks."""
+    while True:
+        await asyncio.sleep(every)
+        await asyncio.to_thread(_sync_now, quiet=True)
+
+
+def _sync_now(quiet: bool = False) -> None:
+    """On every backend start: copy the simulator's current spots + gates, so the dashboard starts
+    from the real state (cars may have moved while we were down). Webhooks keep it live after that."""
+    try:
+        with SessionLocal() as db:
+            counts = sync_from_simulator(db, get_simulator(), log_event=not quiet)
+            parking.expire_stale_sessions(db, timedelta(minutes=get_settings().stale_session_minutes))
+            if not quiet:
+                print(f"[DB] Synced {counts['spots']} spots and {counts['gates']} gates from the simulator.")
+    except Exception as e:
+        print(f"[DB] Could not sync spots from the simulator: {e}")
 
 
 def _sync_if_empty() -> None:

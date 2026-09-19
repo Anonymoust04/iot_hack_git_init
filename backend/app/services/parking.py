@@ -11,6 +11,7 @@ WHY never call the simulator inside a transaction: a slow HTTP call while holdin
 lock makes every other arriving car wait -> traffic jam at the entrance.
 
 Lifecycle:
+    record_arrival     -                          session ENTERING (created, no spot yet)
     allocate_spot      spot FREE->RESERVED        session ENTERING (created)
     mark_parked        spot RESERVED->OCCUPIED    session PARKED
     mark_leaving_spot  spot ->FREE                session EXITING   (frees the spot EARLY)
@@ -189,6 +190,21 @@ def allocate_spot(db: Session, plate: str, car_type: CarType | None = None,
 
 
 @retry_on_deadlock
+def record_arrival(db: Session, plate: str, car_type: CarType | None = None,
+                   raw_data: dict | None = None, at: datetime | None = None) -> None:
+    """Car reached the entrance: open its visit so entry_time is the arrival time.
+    Used when the spot is chosen outside the database (main.py); a repeat is a no-op."""
+    try:
+        if active_session(db, plate, lock=True) is None:
+            db.add(ParkingSession(car_plate=plate, car_type=car_type, entry_time=at or utcnow()))
+            log_event(db, "CAR_ARRIVED", car_plate=plate, raw_data=raw_data)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+@retry_on_deadlock
 def cancel_reservation(db: Session, plate: str, spot_name: str) -> None:
     """Undo allocate_spot, e.g. when the simulator 'goto' call failed."""
     db.execute(
@@ -325,14 +341,39 @@ def record_payment(db: Session, plate: str, amount: Decimal, raw_data: dict | No
 
 
 @retry_on_deadlock
-def complete_departure(db: Session, plate: str, raw_data: dict | None = None) -> None:
+def expire_stale_sessions(db: Session, older_than: timedelta, now: datetime | None = None) -> int:
+    """Close visits with no update for `older_than`: their departure webhook was missed, so the car
+    is long gone. Frees the spot they still hold. Returns how many were closed."""
+    try:
+        cutoff = (now or utcnow()) - older_than
+        stale = db.scalars(
+            select(ParkingSession)
+            .where(ParkingSession.status != SessionStatus.COMPLETED, ParkingSession.updated_at < cutoff)
+            .with_for_update(skip_locked=True)
+        ).all()
+        for session in stale:
+            session.status = SessionStatus.COMPLETED
+            if session.parking_spot_id:
+                db.execute(update(ParkingSpot)
+                           .where(ParkingSpot.id == session.parking_spot_id, ParkingSpot.current_car == session.car_plate)
+                           .values(status=SpotStatus.FREE, current_car=None))
+            log_event(db, "SESSION_EXPIRED", car_plate=session.car_plate)
+        db.commit()
+        return len(stale)
+    except Exception:
+        db.rollback()
+        raise
+
+
+@retry_on_deadlock
+def complete_departure(db: Session, plate: str, raw_data: dict | None = None, at: datetime | None = None) -> None:
     """Car has left the car park. All in ONE transaction:
     session -> COMPLETED + PAID (exit_time/costs kept), spot -> FREE, departure event."""
     try:
         session = active_session(db, plate, lock=True)  # 1. find active session
         spot_name = None
         if session:
-            session.exit_time = session.exit_time or utcnow()      # 2. exit time (set at charge)
+            session.exit_time = session.exit_time or at or utcnow()  # 2. exit time (set at charge)
             # 3./4. parking_cost / charging_cost were stored by record_charge()
             session.payment_status = PaymentStatus.PAID            # 5.
             session.status = SessionStatus.COMPLETED               # 6.

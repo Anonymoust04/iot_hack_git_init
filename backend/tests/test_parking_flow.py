@@ -55,6 +55,34 @@ def test_sync_reads_car_counts_and_skips_leave_parking_spots(db):
     assert db.scalar(select(ParkingSpot.id).where(ParkingSpot.name == "ESCAPE1")) is None
 
 
+def test_resync_keeps_plate_of_car_still_parked(db):
+    upsert_parking_spots(db, [spot("S1")])
+    db.commit()
+    parking.mark_parked(db, "CAR1", "S1")                 # plate known from the Park/CarIn webhook
+    upsert_parking_spots(db, [spot("S1", cars=1)])       # periodic re-sync: simulator gives a count only
+    db.commit()
+    s = get_spot(db, "S1")
+    assert (s.status, s.current_car) == (SpotStatus.OCCUPIED, "CAR1")
+    upsert_parking_spots(db, [spot("S1", cars=0)])       # car gone in the simulator
+    db.commit()
+    s = get_spot(db, "S1")
+    assert (s.status, s.current_car) == (SpotStatus.FREE, None)
+
+
+def test_stale_visits_are_closed(db):
+    from datetime import timedelta
+    from app.models import utcnow
+
+    upsert_parking_spots(db, [spot("S1")])
+    db.commit()
+    parking.mark_parked(db, "GONE1", "S1")           # its departure webhook never arrived
+    assert parking.expire_stale_sessions(db, timedelta(minutes=15)) == 0      # still fresh
+    assert parking.expire_stale_sessions(db, timedelta(minutes=15), now=utcnow() + timedelta(minutes=16)) == 1
+    db.expire_all()
+    assert db.scalar(select(ParkingSession.status)) == SessionStatus.COMPLETED
+    assert get_spot(db, "S1").status == SpotStatus.FREE
+
+
 def test_resync_keeps_reservation(db):
     upsert_parking_spots(db, [spot("S1")])
     db.commit()

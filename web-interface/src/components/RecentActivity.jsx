@@ -1,6 +1,10 @@
-import { recentActivities } from '../data/mockData'
+import { usePolling } from '../hooks/usePolling'
+import { getRecentActivity } from '../services/api'
 
 function RecentActivity() {
+  const { data } = usePolling(getRecentActivity)
+  const recentActivities = data ?? []
+
   return (
     <section className="activity-section">
       <div className="section-header">
