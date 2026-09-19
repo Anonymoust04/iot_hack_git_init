@@ -175,6 +175,10 @@ async def gate_b_worker():
             # 4. Close Gate B (returns to default closed state)
             print(f"[GATE B WORKER] Closing exit gate {gate_name}...")
             await api_close_barrier_gate(gate_name)
+            
+            # 5. Remove departed car from active_cars
+            active_cars.pop(car_plate, None)
+            print(f"[GATE B WORKER] Car {car_plate} departed and removed from active_cars.")
         except Exception as e:
             print(f"[GATE B WORKER ERROR] Failed to operate gate {gate_name} for {car_plate}: {e}")
         finally:
@@ -224,14 +228,26 @@ async def webhook(request: Request):
     # --- Ground-truth sync: update parking_spots hash table from simulator events ---
     # Park/CarIn  => simulator confirms car has physically parked in a spot
     # Park/CarOut => simulator confirms car has physically left a spot
+    car_plate = data.get("CarPlateNumber", "")
     if spot_type == "Park" and spot_name and spot_name in parking_spots:
         async with spot_lock:
             if direction == "CarIn":
                 parking_spots[spot_name] = False  # now occupied
-                print(f"[SPOT SYNC] {spot_name} marked OCCUPIED (Park/CarIn from simulator)")
+                if car_plate and car_plate in active_cars:
+                    active_cars[car_plate]["assigned_spot"] = spot_name
+                print(f"[SPOT SYNC] {spot_name} marked OCCUPIED (Park/CarIn from simulator for {car_plate})")
             elif direction == "CarOut":
                 parking_spots[spot_name] = True   # now free
+                for p, info in list(active_cars.items()):
+                    if info.get("assigned_spot") == spot_name or p == car_plate:
+                        info["assigned_spot"] = None
                 print(f"[SPOT SYNC] {spot_name} marked FREE (Park/CarOut from simulator)")
+
+    # When car leaves the exit spot, it has exited the car park
+    if (spot_type == "ExitSpot" or (spot_name and spot_name.upper().startswith("EXIT"))) and direction == "CarOut":
+        if car_plate:
+            active_cars.pop(car_plate, None)
+            print(f"[EXIT SYNC] Car {car_plate} left ExitSpot and removed from active_cars.")
 
     # Route to parallel queues based on event type
     if spot_type == "EntrySpot" or (spot_name and spot_name.upper().startswith("ENTRY")):
@@ -510,6 +526,8 @@ async def process_car_exit(data: dict):
             async with spot_lock:
                 parking_spots[freed_spot] = True  # mark free immediately
             print(f"[EXIT LOGIC] Spot {freed_spot} freed in parking_spots hash table.")
+        if car_plate in active_cars:
+            active_cars[car_plate]["assigned_spot"] = None
 
     # Step 2: Notify dedicated Gate B worker thread if payment is verified
     if payment_verified:
@@ -576,9 +594,129 @@ def get_all_events(limit: int = 20):
     }
 
 
+@app.get("/recent-activity")
+def get_recent_activity(limit: int = 25):
+    """Return cleanly structured, newest-first recent activity items for the dashboard."""
+    items = []
+    for evt in reversed(webhook_events[-80:]):
+        event_class = evt.get("EventClass", "")
+        server_dt = evt.get("ServerDateTime") or evt.get("Timestamp") or "Recent"
+        time_str = server_dt.split(" ")[-1] if " " in str(server_dt) else str(server_dt)
+        evt_id = evt.get("EventId") or str(len(items) + 1)
+        seq_id = evt.get("SequenceId")
+
+        # 1. Car Spot Action
+        if event_class == "car_spot_action":
+            plate = evt.get("CarPlateNumber") or evt.get("CarPlate") or evt.get("car_plate") or "Unknown"
+            spot_type = evt.get("SpotType", "")
+            spot_name = evt.get("SpotName", "")
+            direction = evt.get("Direction", "")
+
+            if spot_type == "EntrySpot" or "ENTRY" in spot_name.upper():
+                if direction == "CarIn":
+                    event_text = "Arrived at Entrance"
+                    status_text = "Queued"
+                else:
+                    event_text = "Passed Entrance Gate"
+                    status_text = "In Transit"
+            elif spot_type == "Park":
+                if direction == "CarIn":
+                    event_text = f"Parked in {spot_name}"
+                    status_text = "Parked"
+                else:
+                    event_text = f"Left spot {spot_name}"
+                    status_text = "Departing"
+            elif spot_type == "ExitSpot" or "EXIT" in spot_name.upper():
+                if direction == "CarIn":
+                    event_text = "Arrived at Exit Gate"
+                    status_text = "Processing"
+                else:
+                    event_text = "Exited Car Park"
+                    status_text = "Departed"
+            else:
+                event_text = f"{spot_type} {direction}"
+                status_text = "Active"
+
+            items.append({
+                "id": evt_id,
+                "sequenceId": seq_id,
+                "category": "car",
+                "plate": plate,
+                "event": event_text,
+                "spot": spot_name or "—",
+                "time": time_str,
+                "status": status_text,
+            })
+
+        # 2. Gate Action
+        elif event_class == "gate_action":
+            gate_name = evt.get("Name", "Gate")
+            action = evt.get("Action", "Operated")
+            items.append({
+                "id": evt_id,
+                "sequenceId": seq_id,
+                "category": "gate",
+                "plate": f"[{gate_name}]",
+                "event": f"Gate {gate_name} {action}",
+                "spot": gate_name,
+                "time": time_str,
+                "status": "Open" if action.lower() in ("open", "opened") else "Closed",
+            })
+
+        # 3. Penalty / Fine
+        elif event_class == "penalty":
+            plate = evt.get("CarPlateNumber") or evt.get("ComponentName") or "Unknown"
+            reason = evt.get("Reason", "Violation")
+            fine = evt.get("FineAmount", "0")
+            items.append({
+                "id": evt_id,
+                "sequenceId": seq_id,
+                "category": "alert",
+                "plate": plate,
+                "event": f"Penalty: {reason} (${fine})",
+                "spot": evt.get("ComponentName", "—"),
+                "time": time_str,
+                "status": "Penalty",
+            })
+
+        # 4. Other events (CO alert, component broken, etc.)
+        elif event_class:
+            items.append({
+                "id": evt_id,
+                "sequenceId": seq_id,
+                "category": "system",
+                "plate": evt.get("CarPlateNumber") or "[SYSTEM]",
+                "event": event_class.replace("_", " ").title(),
+                "spot": evt.get("Name") or evt.get("ComponentName") or "—",
+                "time": time_str,
+                "status": "Alert",
+            })
+
+        if len(items) >= limit:
+            break
+
+    # If still below limit, supplement from recent_car_arrivals
+    if len(items) < limit:
+        for arr in reversed(recent_car_arrivals[-(limit - len(items)):]):
+            p = arr.get("car_plate")
+            if p and not any(it.get("plate") == p for it in items):
+                items.append({
+                    "id": f"arr-{len(items)+1}",
+                    "sequenceId": None,
+                    "category": "car",
+                    "plate": p,
+                    "event": "Arrived at Entrance",
+                    "spot": arr.get("spot_name", "EntrySpot"),
+                    "time": str(arr.get("arrival_time") or "Recent").split(" ")[-1],
+                    "status": "Queued",
+                })
+
+    return items
+
+
 @app.get("/system-status")
 async def get_system_status():
-    """Return backend status, simulator connectivity, and current counts."""
+    """Return backend status, simulator connectivity, and current counts from thread-safe parking_spots."""
     sim_online = False
     try:
         await call_simulator_api("test")
@@ -586,9 +724,11 @@ async def get_system_status():
     except Exception:
         sim_online = False
 
-    total_spots = len(parking_spots)
-    occupied_count = sum(1 for free in parking_spots.values() if not free)
-    free_count = total_spots - occupied_count
+    async with spot_lock:
+        total_spots = len(parking_spots)
+        occupied_count = sum(1 for free in parking_spots.values() if not free)
+        free_count = total_spots - occupied_count
+
     return {
         "backend": "online",
         "simulator": "online" if sim_online else "offline",
@@ -606,8 +746,21 @@ def get_active_cars():
     cars_list = []
     now = time.time()
     for plate, info in active_cars.items():
-        entry_ts = info.get("entry_time", now)
-        elapsed_minutes = max(0, int((now - entry_ts) / 60))
+        entry_raw = info.get("entry_time", "")
+        display_time = "Recently"
+        elapsed_str = "Active"
+        if isinstance(entry_raw, (int, float)):
+            display_time = datetime.fromtimestamp(entry_raw).strftime("%I:%M %p")
+            elapsed_str = f"{max(0, int((now - entry_raw) / 60))}m"
+        elif isinstance(entry_raw, str) and entry_raw:
+            display_time = entry_raw.split(" ")[-1] if " " in entry_raw else entry_raw
+            try:
+                dt = datetime.strptime(entry_raw, "%Y-%m-%d %H:%M:%S")
+                diff = max(0, int((datetime.now() - dt).total_seconds() / 60))
+                elapsed_str = f"{diff}m"
+            except Exception:
+                elapsed_str = "Active"
+
         cars_list.append({
             "plateNumber": plate,
             "vehicleType": info.get("car_type", "Standard"),
@@ -616,9 +769,8 @@ def get_active_cars():
             "colour": "Silver",
             "assignedSpot": info.get("assigned_spot", "—"),
             "parkingSpot": info.get("assigned_spot", "—"),
-            "entryTime": datetime.fromtimestamp(entry_ts).strftime("%I:%M %p") if isinstance(entry_ts, (int, float)) else str(entry_ts),
-            "entryTimestamp": entry_ts,
-            "duration": f"{elapsed_minutes}m",
+            "entryTime": display_time,
+            "duration": elapsed_str,
             "plannedDuration": info.get("planned_duration", 0),
             "charged": info.get("charged", False),
             "status": "Parked" if not info.get("charged", False) else "Exiting",
@@ -635,8 +787,19 @@ def get_vehicle_details(plate: str):
     now = time.time()
     info = active_cars.get(plate)
     if info:
-        entry_ts = info.get("entry_time", now)
-        elapsed_minutes = max(0, int((now - entry_ts) / 60))
+        entry_raw = info.get("entry_time", "")
+        display_time = str(entry_raw)
+        elapsed_str = "Active"
+        if isinstance(entry_raw, (int, float)):
+            display_time = datetime.fromtimestamp(entry_raw).strftime("%I:%M %p")
+            elapsed_str = f"{max(0, int((now - entry_raw) / 60))}m"
+        elif isinstance(entry_raw, str) and entry_raw:
+            try:
+                dt = datetime.strptime(entry_raw, "%Y-%m-%d %H:%M:%S")
+                display_time = dt.strftime("%I:%M %p")
+                elapsed_str = f"{max(0, int((datetime.now() - dt).total_seconds() / 60))}m"
+            except Exception:
+                display_time = entry_raw
         return {
             "found": True,
             "plateNumber": plate,
@@ -646,9 +809,9 @@ def get_vehicle_details(plate: str):
             "colour": "Silver",
             "parkingSpot": info.get("assigned_spot", "—"),
             "status": "Parked" if not info.get("charged", False) else "Exiting",
-            "entryTime": datetime.fromtimestamp(entry_ts).strftime("%I:%M %p") if isinstance(entry_ts, (int, float)) else str(entry_ts),
+            "entryTime": display_time,
             "exitTime": "—",
-            "duration": f"{elapsed_minutes}m",
+            "duration": elapsed_str,
             "charged": info.get("charged", False),
         }
     
@@ -688,7 +851,41 @@ def get_vehicle_details(plate: str):
                 "duration": "Completed",
                 "charged": True,
             }
-            
+
+    # Check MySQL database parking sessions
+    try:
+        from app.db.session import SessionLocal
+        from app.models import ParkingSession, ParkingSpot
+        from sqlalchemy import select
+        with SessionLocal() as db:
+            row = db.execute(
+                select(ParkingSession, ParkingSpot.name)
+                .outerjoin(ParkingSpot, ParkingSession.parking_spot_id == ParkingSpot.id)
+                .where(ParkingSession.car_plate.like(f"{plate}%"))
+                .order_by(ParkingSession.id.desc())
+            ).first()
+            if row:
+                sess, s_name = row
+                entry_str = sess.entry_time.strftime("%I:%M %p") if sess.entry_time else "Earlier"
+                exit_str = sess.exit_time.strftime("%I:%M %p") if sess.exit_time else "—"
+                fee_display = f"${(sess.fee_cents or 0) / 100:.2f}"
+                return {
+                    "found": True,
+                    "plateNumber": sess.car_plate,
+                    "vehicleType": getattr(sess, "car_type", "Sedan") or "Sedan",
+                    "brand": "Standard",
+                    "model": "Car",
+                    "colour": "Silver",
+                    "parkingSpot": s_name or "—",
+                    "status": "Exited" if sess.status == "completed" else "Active",
+                    "entryTime": entry_str,
+                    "exitTime": exit_str,
+                    "duration": f"Fee: {fee_display}" if sess.fee_cents else "Completed",
+                    "charged": sess.status == "completed" or bool(sess.fee_cents),
+                }
+    except Exception:
+        pass
+
     return {
         "found": False,
         "plateNumber": plate,
@@ -700,20 +897,81 @@ def get_vehicle_details(plate: str):
 
 @app.get("/list-parking-spots")
 async def list_parking_spots():
-    """Fetch all parking spots from the simulator, with fallback to ground truth."""
+    """Return all parking spots state based strictly on the thread-safe parking_spots hash table holding spot_lock."""
+    # 1. Check simulator for any broken/maintenance flags or unrecorded detections
+    broken_spots = set()
+    detected_map = {}
     try:
-        return await call_simulator_api("list-parking-spots")
-    except Exception:
-        # Fallback to local parking_spots hash map
-        spots = []
-        for name, is_free in parking_spots.items():
-            spots.append({
-                "name": name,
-                "isOccupied": not is_free,
-                "carPlateNumber": None,
-                "zone": "ZONE1"
-            })
-        return spots
+        sim_spots = await call_simulator_api("list-parking-spots")
+        if isinstance(sim_spots, list):
+            for s in sim_spots:
+                s_name = s.get("name")
+                if s_name:
+                    detected_map[s_name] = s.get("detectedCars", 0)
+                    if s.get("broken") or s.get("isUnderMaintenance"):
+                        broken_spots.add(s_name)
+    except Exception as e:
+        print(f"[WARN] Failed calling simulator list-parking-spots: {e}")
+
+    now = time.time()
+    async with spot_lock:
+        # Clean active_cars stale spots and update parking_spots
+        for name in VALID_PARKING_SPOTS:
+            if name in detected_map:
+                if detected_map[name] > 0:
+                    parking_spots[name] = False
+                else:
+                    in_transit = False
+                    for p, info in list(active_cars.items()):
+                        if info.get("assigned_spot") == name:
+                            t = info.get("entry_time", 0)
+                            if isinstance(t, (int, float)) and (now - t < 15):
+                                in_transit = True
+                            else:
+                                info["assigned_spot"] = None
+                    if not in_transit:
+                        parking_spots[name] = True
+
+        local_spots_snapshot = dict(parking_spots)
+
+    # 3. Construct the spots array (S1 to S30) directly from parking_spots hash table
+    spots = []
+    for i in range(1, 31):
+        name = f"S{i}"
+        is_free = local_spots_snapshot.get(name, True)
+        is_broken = name in broken_spots
+        is_occupied = not is_free
+
+        # Match vehicle plate from active_cars or recent webhook events ONLY if occupied
+        assigned_plate = None
+        if is_occupied:
+            assigned_plate = next((p for p, info in active_cars.items() if info.get("assigned_spot") == name), None)
+            if not assigned_plate:
+                for evt in reversed(webhook_events):
+                    evt_spot = evt.get("SpotName") or evt.get("spot_name")
+                    if evt_spot == name:
+                        p = evt.get("CarPlate") or evt.get("car_plate") or evt.get("CarPlateNumber")
+                        if p:
+                            assigned_plate = p
+                            break
+
+        status = "maintenance" if is_broken else ("occupied" if is_occupied else "free")
+
+        spots.append({
+            "name": name,
+            "purpose": "Park",
+            "number": i,
+            "isOccupied": is_occupied,
+            "detectedCars": 1 if is_occupied else 0,
+            "broken": is_broken,
+            "isUnderMaintenance": is_broken,
+            "isBroken": is_broken,
+            "status": status,
+            "carPlateNumber": assigned_plate if is_occupied else None,
+            "zone": "Zone 1"
+        })
+
+    return spots
 
 
 @app.get("/list-barriers")
