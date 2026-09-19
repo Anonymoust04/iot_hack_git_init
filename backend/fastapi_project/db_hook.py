@@ -97,7 +97,9 @@ def _sync_now(quiet: bool = False) -> None:
     try:
         with SessionLocal() as db:
             counts = sync_from_simulator(db, get_simulator(), log_event=not quiet)
-            parking.expire_stale_sessions(db, timedelta(minutes=get_settings().stale_session_minutes))
+            settings = get_settings()
+            parking.expire_stale_sessions(db, timedelta(minutes=settings.stale_session_minutes),
+                                          entering_older_than=timedelta(minutes=settings.stale_entering_minutes))
             if not quiet:
                 print(f"[DB] Synced {counts['spots']} spots and {counts['gates']} gates from the simulator.")
     except Exception as e:

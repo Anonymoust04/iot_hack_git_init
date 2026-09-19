@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -341,14 +341,20 @@ def record_payment(db: Session, plate: str, amount: Decimal, raw_data: dict | No
 
 
 @retry_on_deadlock
-def expire_stale_sessions(db: Session, older_than: timedelta, now: datetime | None = None) -> int:
+def expire_stale_sessions(db: Session, older_than: timedelta, now: datetime | None = None,
+                          entering_older_than: timedelta | None = None) -> int:
     """Close visits with no update for `older_than`: their departure webhook was missed, so the car
-    is long gone. Frees the spot they still hold. Returns how many were closed."""
+    is long gone. `entering_older_than` (shorter): a car still ENTERING that long never parked, e.g.
+    it was sent to 'leavepark'. Frees the spot they still hold. Returns how many were closed."""
     try:
-        cutoff = (now or utcnow()) - older_than
+        now = now or utcnow()
+        is_stale = ParkingSession.updated_at < now - older_than
+        if entering_older_than is not None:
+            is_stale = or_(is_stale, and_(ParkingSession.status == SessionStatus.ENTERING,
+                                          ParkingSession.updated_at < now - entering_older_than))
         stale = db.scalars(
             select(ParkingSession)
-            .where(ParkingSession.status != SessionStatus.COMPLETED, ParkingSession.updated_at < cutoff)
+            .where(ParkingSession.status != SessionStatus.COMPLETED, is_stale)
             .with_for_update(skip_locked=True)
         ).all()
         for session in stale:

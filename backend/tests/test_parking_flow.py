@@ -83,6 +83,20 @@ def test_stale_visits_are_closed(db):
     assert get_spot(db, "S1").status == SpotStatus.FREE
 
 
+def test_car_that_entered_but_never_parked_is_closed_sooner(db):
+    from datetime import timedelta
+    from app.models import utcnow
+
+    parking.record_arrival(db, "AWAY2")                 # sent to leavepark: no more events
+    parking.mark_parked(db, "PARKED2", "S9")            # a parked car must stay
+    later = utcnow() + timedelta(minutes=4)
+    assert parking.expire_stale_sessions(db, timedelta(minutes=15), now=later,
+                                         entering_older_than=timedelta(minutes=3)) == 1
+    db.expire_all()
+    status = dict(db.execute(select(ParkingSession.car_plate, ParkingSession.status)).all())
+    assert status == {"AWAY2": SessionStatus.COMPLETED, "PARKED2": SessionStatus.PARKED}
+
+
 def test_resync_keeps_reservation(db):
     upsert_parking_spots(db, [spot("S1")])
     db.commit()

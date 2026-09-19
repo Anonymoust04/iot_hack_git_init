@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     # A visit with no event for this long is closed (its departure webhook was missed), so
     # "cars inside" doesn't keep growing. Must be longer than the simulator's MaxParkingTime.
     stale_session_minutes: float = 15
+    # A car still ENTERING after this long never parked (e.g. sent to 'leavepark' when full): close it.
+    stale_entering_minutes: float = 3
     # Reject webhooks whose MD5 Signature doesn't match (fake payments). Only turn off to debug.
     webhook_verify_signature: bool = True
     # The simulator currently sends "Signature": null. false: accept unsigned webhooks (a WRONG
