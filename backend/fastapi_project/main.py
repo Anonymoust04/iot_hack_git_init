@@ -649,7 +649,6 @@ async def process_car_entry(data: dict):
                 # Do NOT blindly send the car to ENTRY2/ENTRY3. The simulator
                 # rejects the request when another car is already occupying
                 # that EntrySpot. Queue it until the EntrySpot reports CarOut.
-                await api_open_barrier_gate(target_gate)
                 await send_car_to_entry_or_queue(
                     car_plate, target_entry, assigned_spot
                 )
