@@ -1,3 +1,5 @@
+# Keep backend/README.md's install command working with the shared package list.
+-r ../requirements.txt
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic-settings==2.7.1

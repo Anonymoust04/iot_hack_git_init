@@ -1,13 +1,20 @@
 """Read-only park status for the dashboard (served from MySQL, never from the simulator)."""
 
 from fastapi import APIRouter
-from sqlalchemy import func, select
+from sqlalchemy import and_, exists, func, not_, select
 
 from app.api.deps import CurrentUser, DbSession
-from app.models import Gate, ParkingSpot, SpotPurpose, SpotStatus
+from app.config import get_settings
+from app.models import Event, Gate, ParkingSession, ParkingSpot, SessionStatus, SpotPurpose, SpotStatus
 from app.schemas import DashboardOut, GateOut, SpotOut, ZoneSummary
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+
+
+def gate_out(gate: Gate) -> GateOut:
+    s = get_settings()
+    roles = {s.entry_gate.lower(): "entrance", s.exit_gate.lower(): "exit"}
+    return GateOut.model_validate(gate).model_copy(update={"role": roles.get(gate.name.lower())})
 
 
 @router.get("", response_model=DashboardOut)
@@ -34,11 +41,23 @@ def summary(db: DbSession, _: CurrentUser):
     zone_list = sorted(zones.values(), key=lambda z: z.zone)
     total_free = sum(z.free for z in zone_list)
     gates = db.scalars(select(Gate).order_by(Gate.name)).all()
+    # Inside = past the entrance: not completed, and not still queuing outside (ENTERING without CAR_ENTERED)
+    entered = exists().where(
+        Event.car_plate == ParkingSession.car_plate,
+        Event.event_type == "CAR_ENTERED",
+        Event.event_time >= ParkingSession.created_at,
+    )
+    queuing = and_(ParkingSession.status == SessionStatus.ENTERING, not_(entered))
+    cars_inside = db.scalar(
+        select(func.count()).select_from(ParkingSession)
+        .where(ParkingSession.status != SessionStatus.COMPLETED, not_(queuing))
+    )
     return DashboardOut(
         zones=zone_list,
-        gates=[GateOut.model_validate(g) for g in gates],
+        gates=[gate_out(g) for g in gates],
         total_free=total_free,
         park_full=total_free == 0,
+        cars_inside=cars_inside,
     )
 
 
@@ -52,4 +71,4 @@ def spots(db: DbSession, _: CurrentUser, zone: str | None = None):
 
 @router.get("/gates", response_model=list[GateOut])
 def gates(db: DbSession, _: CurrentUser):
-    return db.scalars(select(Gate).order_by(Gate.name)).all()
+    return [gate_out(g) for g in db.scalars(select(Gate).order_by(Gate.name)).all()]

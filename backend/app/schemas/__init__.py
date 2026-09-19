@@ -47,9 +47,10 @@ class SpotOut(ORMModel):
 class GateOut(ORMModel):
     name: str
     zone: str
-    state: str
+    state: str           # Open | Closed | Opening | Closing
     broken: bool
     under_maintenance: bool
+    role: str | None = None  # "entrance" / "exit" (from ENTRY_GATE / EXIT_GATE), else None
 
 
 class ZoneSummary(BaseModel):
@@ -66,6 +67,7 @@ class DashboardOut(BaseModel):
     gates: list[GateOut]
     total_free: int
     park_full: bool
+    cars_inside: int  # visits not COMPLETED: entering, parked or on the way out
 
 
 # ---- history ----

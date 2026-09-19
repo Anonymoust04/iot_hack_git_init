@@ -1,6 +1,7 @@
 """Searchable history of parking sessions and events."""
 
 from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Query
 from sqlalchemy import select
@@ -45,12 +46,12 @@ def search_events(
     db: DbSession,
     _: CurrentUser,
     plate: str | None = None,
-    event_type: str | None = None,
+    event_type: Annotated[list[str] | None, Query()] = None,  # repeat to match several: ?event_type=A&event_type=B
     limit: int = Query(20, le=500),
 ):
     q = select(Event)
     if plate:
         q = q.where(Event.car_plate == plate)
     if event_type:
-        q = q.where(Event.event_type == event_type)
+        q = q.where(Event.event_type.in_(event_type))
     return db.scalars(q.order_by(Event.id.desc()).limit(limit)).all()

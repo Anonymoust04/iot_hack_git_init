@@ -3,10 +3,16 @@ import "../styles/Dashboard.css";
 import ParkingGrid from '../components/ParkingGrid'
 import GateControl from '../components/GateControl'
 import RecentActivity from '../components/RecentActivity'
-import { dashboardStats } from '../data/mockData'
+import { usePolling } from '../hooks/usePolling'
+import { getBackendStatus, getDashboardStats } from '../services/api'
 
 function Dashboard() {
-  const isCarParkFull = dashboardStats.availableSpaces === 0
+  const { data: stats } = usePolling(getDashboardStats)
+  const { data: backendOnline } = usePolling(getBackendStatus)
+  const dashboardStats = stats ?? { totalSpaces: 0, availableSpaces: 0, occupiedSpaces: 0, carsInside: 0 }
+
+  // Only once real numbers have loaded (and the park has spots), not while loading
+  const isCarParkFull = stats !== null && stats.totalSpaces > 0 && stats.availableSpaces === 0
 
   return (
     <div className="dashboard">
@@ -20,7 +26,7 @@ function Dashboard() {
 
         <div className="system-status">
           <span className="status-dot"></span>
-          System Online
+          {backendOnline ? 'System Online' : 'System Offline'}
         </div>
       </header>
 

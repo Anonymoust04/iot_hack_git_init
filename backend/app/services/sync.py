@@ -76,9 +76,14 @@ def upsert_parking_spots(db: Session, spots: list[dict]) -> int:
         purpose=stmt.inserted.purpose,
         car_type=stmt.inserted.car_type,
         status=stmt.inserted.status,
-        # RESERVED spots keep their current_car (the car on its way)
+        # RESERVED spots keep their current_car (the car on its way); so do spots still OCCUPIED
+        # when the simulator gives only a car count (the plate came from the Park/CarIn webhook)
         current_car=case(
             (stmt.inserted.status == SpotStatus.RESERVED.value, table.c.current_car),
+            (
+                (stmt.inserted.status == SpotStatus.OCCUPIED.value) & stmt.inserted.current_car.is_(None),
+                table.c.current_car,
+            ),
             else_=stmt.inserted.current_car,
         ),
         broken=stmt.inserted.broken,
@@ -113,12 +118,14 @@ def has_spots(db: Session) -> bool:
     return db.scalar(select(ParkingSpot.id).where(ParkingSpot.purpose == SpotPurpose.PARK).limit(1)) is not None
 
 
-def sync_from_simulator(db: Session, sim: SimulatorClient) -> dict:
-    """Fetch spots + gates from the simulator and upsert them in ONE transaction."""
+def sync_from_simulator(db: Session, sim: SimulatorClient, log_event: bool = True) -> dict:
+    """Fetch spots + gates from the simulator and upsert them in ONE transaction.
+    log_event=False for the periodic re-sync, so the event log isn't flooded."""
     spots = sim.list_parking_spots()
     gates = sim.list_barriers()
     counts = {"spots": upsert_parking_spots(db, spots), "gates": upsert_gates(db, gates)}
-    db.add(Event(event_type="SYNC", raw_data={"spots": spots, "gates": gates}))
+    if log_event:
+        db.add(Event(event_type="SYNC", raw_data={"spots": spots, "gates": gates}))
     db.commit()
     log.info("Synced %(spots)d spots and %(gates)d gates", counts)
     return counts

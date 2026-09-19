@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { searchVehicles } from "../services/api";
 
 function VehicleSearch() {
   const navigate = useNavigate();
@@ -10,49 +11,30 @@ function VehicleSearch() {
   // What the user actually searched for
   const [searchTerm, setSearchTerm] = useState("");
 
-  // Temporary vehicle data.
-  // This will be replaced with backend data later.
-  const vehicles = [
-    {
-      plateNumber: "WXY 1234",
-      vehicleType: "Sedan",
-      brand: "Toyota",
-      model: "Corolla",
-      parkingSpot: "S12",
-      status: "Parked",
-      entryTime: "09:42 AM",
-    },
-    {
-      plateNumber: "VAB 5678",
-      vehicleType: "SUV",
-      brand: "Honda",
-      model: "CR-V",
-      parkingSpot: "S07",
-      status: "Parked",
-      entryTime: "10:15 AM",
-    },
-    {
-      plateNumber: "JQK 9012",
-      vehicleType: "Hatchback",
-      brand: "Perodua",
-      model: "Myvi",
-      parkingSpot: "S21",
-      status: "Exited",
-      entryTime: "08:20 AM",
-    },
-  ];
+  // Parking records from the backend for the searched plate
+  const [vehicles, setVehicles] = useState([]);
 
   // Only runs when the SEARCH button is clicked
-  const handleSearch = (event) => {
+  const handleSearch = async (event) => {
     event.preventDefault();
 
-    setSearchTerm(inputValue.trim());
+    const term = inputValue.trim();
+    if (term === "") return;
+
+    try {
+      setVehicles(await searchVehicles(term));
+    } catch (err) {
+      alert(`Search failed: ${err.message}`);
+      setVehicles([]);
+    }
+    setSearchTerm(term);
   };
 
   // Clear both the input and the search results
   const handleClear = () => {
     setInputValue("");
     setSearchTerm("");
+    setVehicles([]);
   };
 
   // Only filter vehicles after SEARCH has been clicked

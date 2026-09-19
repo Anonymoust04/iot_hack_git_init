@@ -1,10 +1,30 @@
 import { useState } from 'react'
+import { usePolling } from '../hooks/usePolling'
+import { closeGate, getGates, openGate } from '../services/api'
+
+// Card text for each gate role (which barrier is which comes from the backend .env)
+const GATE_LABELS = {
+  entrance: { title: 'Entrance Gate', description: 'Main vehicle entrance' },
+  exit: { title: 'Exit Gate', description: 'Main vehicle exit' },
+}
 
 function GateControl() {
-  // Mock state for frontend development.
-  // Backend/API will replace this later.
-  const [entranceOpen, setEntranceOpen] = useState(false)
-  const [exitOpen, setExitOpen] = useState(true)
+  // Live gate state from the backend (updated by the simulator's gate webhooks)
+  const { data, error, refresh } = usePolling(getGates)
+  const gates = data ?? []
+  const [busyGate, setBusyGate] = useState(null)
+
+  const toggleGate = async (gate) => {
+    setBusyGate(gate.name)
+    try {
+      await (gate.isOpen ? closeGate(gate.name) : openGate(gate.name))
+      await refresh()
+    } catch (err) {
+      alert(`Could not ${gate.isOpen ? 'close' : 'open'} ${gate.name}: ${err.message}`)
+    } finally {
+      setBusyGate(null)
+    }
+  }
 
   return (
     <section className="gate-section">
@@ -17,45 +37,33 @@ function GateControl() {
 
       <div className="gate-grid">
 
-        <div className="gate-card">
-          <div className="gate-info">
-            <div>
-              <h3>Entrance Gate</h3>
-              <p>Main vehicle entrance</p>
+        {gates.map((gate) => (
+          <div className="gate-card" key={gate.name}>
+            <div className="gate-info">
+              <div>
+                <h3>{GATE_LABELS[gate.role].title}</h3>
+                <p>{GATE_LABELS[gate.role].description} · {gate.name}</p>
+              </div>
+
+              <span className={`gate-status ${gate.isOpen ? 'open' : 'closed'}`}>
+                {gate.state}
+              </span>
             </div>
 
-            <span className={`gate-status ${entranceOpen ? 'open' : 'closed'}`}>
-              {entranceOpen ? 'Open' : 'Closed'}
-            </span>
+            <button
+              className={`gate-button ${gate.isOpen ? 'close' : 'open'}`}
+              onClick={() => toggleGate(gate)}
+              disabled={busyGate === gate.name}
+            >
+              {gate.isOpen ? 'Close Gate' : 'Open Gate'}
+            </button>
           </div>
+        ))}
 
-          <button
-            className={`gate-button ${entranceOpen ? 'close' : 'open'}`}
-            onClick={() => setEntranceOpen(!entranceOpen)}
-          >
-            {entranceOpen ? 'Close Gate' : 'Open Gate'}
-          </button>
-        </div>
-
-        <div className="gate-card">
-          <div className="gate-info">
-            <div>
-              <h3>Exit Gate</h3>
-              <p>Main vehicle exit</p>
-            </div>
-
-            <span className={`gate-status ${exitOpen ? 'open' : 'closed'}`}>
-              {exitOpen ? 'Open' : 'Closed'}
-            </span>
-          </div>
-
-          <button
-            className={`gate-button ${exitOpen ? 'close' : 'open'}`}
-            onClick={() => setExitOpen(!exitOpen)}
-          >
-            {exitOpen ? 'Close Gate' : 'Open Gate'}
-          </button>
-        </div>
+        {data !== null && gates.length === 0 && (
+          <p>No gates yet: start the simulator, then the backend syncs them.</p>
+        )}
+        {error && <p>Could not load gates: {error.message}</p>}
 
       </div>
     </section>

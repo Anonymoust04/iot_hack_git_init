@@ -17,6 +17,9 @@ if _real.test_db_name == _real.db_name:
 
 # Point the whole app at the test database BEFORE app.db.session creates its engine.
 os.environ["DB_NAME"] = _real.test_db_name
+# Never talk to a real simulator from tests (a running one would overwrite the test tables)
+os.environ["SIM_BASE_URL"] = "http://127.0.0.1:9/api/v1"
+os.environ["SIM_SYNC_SECONDS"] = "0"
 os.environ["JWT_SECRET"] = "test-secret"
 os.environ["BOOTSTRAP_ADMIN_USERNAME"] = "admin"
 os.environ["BOOTSTRAP_ADMIN_PASSWORD"] = "admin-pw"
