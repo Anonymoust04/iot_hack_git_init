@@ -3,34 +3,19 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
 
 from app.api.routes import auth, control, dashboard, history, webhook
 from app.config import get_settings
-from app.core.security import hash_password
-from app.db.session import Base, SessionLocal, engine
-from app.models import Role, User
+from app.db.init_db import apply_schema, check_schema, seed_admin
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
 
 
-def seed_admin() -> None:
-    settings = get_settings()
-    with SessionLocal() as db:
-        if db.scalar(select(User).where(User.role == Role.ADMIN)) is None:
-            db.add(User(
-                username=settings.bootstrap_admin_username,
-                password_hash=hash_password(settings.bootstrap_admin_password),
-                role=Role.ADMIN,
-            ))
-            db.commit()
-            log.info("Seeded admin user '%s'", settings.bootstrap_admin_username)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(engine)  # TODO: switch to Alembic migrations if schema churns
+    apply_schema()  # CREATE TABLE IF NOT EXISTS from database/schema.sql (no-op if tables exist)
+    check_schema()  # refuse to start if existing tables lack columns the code needs
     seed_admin()
     # TODO(team): on startup, login + sync_from_simulator() once (see services/parking.py)
     yield
