@@ -9,7 +9,7 @@ ParkingSimulator-win-x64/
 .env
 .env.*
 !.env.example
-
+backend/fastapi-env/
 # Python
 __pycache__/
 *.py[cod]
