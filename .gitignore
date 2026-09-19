@@ -2,7 +2,7 @@
 .env
 .env.*
 !.env.example
-
+backend/fastapi-env/
 # Python
 __pycache__/
 *.py[cod]
