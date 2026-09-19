@@ -5,7 +5,7 @@
     python -m app.db.init_db --reset   # DROP all our tables first (deletes ALL data!), then as above
 
 Safe to run many times: CREATE TABLE IF NOT EXISTS skips existing tables.
-NOTE: it never ALTERs an existing table. After changing schema.sql during development,
+NOTE: it only ALTERs existing tables to ADD the columns listed in UPGRADES below. For any other change,
 use --reset (dev data only) or run the ALTER TABLE yourself.
 """
 
@@ -37,6 +37,45 @@ def apply_schema(eng: Engine = engine) -> None:
     with eng.begin() as conn:
         for stmt in schema_statements():
             conn.execute(text(stmt.rstrip(";")))
+    upgrade_schema(eng)
+
+
+# Columns added to existing tables after they were first created (CREATE TABLE IF NOT EXISTS can't).
+# Only ADDs what is missing: never drops or changes data. Safe to run on every start.
+UPGRADES = {
+    # Level 2 merge: two versions of user_permissions existed; the table needs all of these
+    "user_permissions": [
+        ("enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+        ("granted_by", "VARCHAR(64) NULL"),
+        ("granted_at", "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+    ],
+}
+MYSQL_DUPLICATE_COLUMN = 1060
+
+
+def upgrade_schema(eng: Engine = engine) -> None:
+    insp = inspect(eng)
+    for table, columns in UPGRADES.items():
+        if not insp.has_table(table):
+            continue
+        existing = {c["name"]: c for c in insp.get_columns(table)}
+        for name, ddl in columns:
+            if name in existing:
+                continue
+            try:
+                with eng.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE `{table}` ADD COLUMN `{name}` {ddl}"))
+                log.info("Schema upgrade: added %s.%s", table, name)
+            except Exception as exc:  # another backend added it at the same moment
+                if getattr(getattr(exc, "orig", None), "args", [None])[0] != MYSQL_DUPLICATE_COLUMN:
+                    raise
+    # an older user_permissions had permission VARCHAR(32); names now go up to 64
+    if insp.has_table("user_permissions"):
+        perm = next((c for c in inspect(eng).get_columns("user_permissions") if c["name"] == "permission"), None)
+        if perm is not None and getattr(perm["type"], "length", 64) < 64:
+            with eng.begin() as conn:
+                conn.execute(text("ALTER TABLE `user_permissions` MODIFY `permission` VARCHAR(64) NOT NULL"))
+            log.info("Schema upgrade: widened user_permissions.permission to 64")
 
 
 def check_schema(eng: Engine = engine) -> None:

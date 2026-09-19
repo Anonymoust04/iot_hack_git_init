@@ -13,7 +13,8 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 def gate_out(gate: Gate) -> GateOut:
     s = get_settings()
-    roles = {s.entry_gate.lower(): "entrance", s.exit_gate.lower(): "exit"}
+    roles = {name.strip().lower(): "entrance" for name in s.entry_gate.split(",") if name.strip()}
+    roles |= {name.strip().lower(): "exit" for name in s.exit_gate.split(",") if name.strip()}
     return GateOut.model_validate(gate).model_copy(update={"role": roles.get(gate.name.lower())})
 
 

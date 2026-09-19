@@ -7,6 +7,8 @@ async function request(endpoint, options = {}) {
   const token = localStorage.getItem('token');
   const headers = {
     'Content-Type': 'application/json',
+    // ngrok's free tunnel (public backend URL) shows an HTML warning page unless this header is sent
+    'ngrok-skip-browser-warning': '1',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(options.headers || {}),
   };
@@ -38,10 +40,30 @@ async function request(endpoint, options = {}) {
 /**
  * System and health status
  */
+// Last good status, shared by every page: switching tabs (a page remounts) or one slow refresh must not
+// flash "offline". Only report offline when the backend hasn't answered for STATUS_GRACE_MS.
+const STATUS_GRACE_MS = 15000;
+let lastStatus = null;
+let lastStatusAt = 0;
+
+export function getLastKnownStatus() {
+  return lastStatus;
+}
+
+export function isLastKnownOnline() {
+  return Boolean(lastStatus && lastStatus.backend === 'online' && lastStatus.simulator === 'online');
+}
+
 export async function getSystemStatus() {
   try {
-    return await request('/system-status');
+    const status = await request('/system-status');
+    lastStatus = status;
+    lastStatusAt = Date.now();
+    return status;
   } catch {
+    if (lastStatus && Date.now() - lastStatusAt < STATUS_GRACE_MS) {
+      return lastStatus; // one missed refresh: keep showing the last known state
+    }
     return {
       backend: 'offline',
       simulator: 'offline',
@@ -57,104 +79,82 @@ export async function getSystemStatus() {
 export const getBackendStatus = getSystemStatus;
 
 /**
- * Fetch and normalize parking spaces reported by the simulator.
+ * Parking spaces from the backend database (GET /api/dashboard/spots): kept equal to the simulator by
+ * webhooks + a periodic re-sync, and it knows the plates. No simulator list-* call per refresh.
+ * status: free | occupied (a car is parked or on its way) | maintenance (broken / under maintenance)
  */
+const SPOT_STATUS = { FREE: 'free', RESERVED: 'occupied', OCCUPIED: 'occupied', BROKEN: 'maintenance', MAINTENANCE: 'maintenance' };
+
 export async function getParkingSpots() {
   try {
-    const data = await request('/list-parking-spots');
-    const rawList = Array.isArray(data) ? data : data?.spots || data?.data || data?.items || [];
-    if (!Array.isArray(rawList)) return [];
-
-    return rawList.filter((spot) => spot?.purpose === 'Park' && typeof spot.zoneParent === 'string').map((raw) => {
-      const isOccupied = Array.isArray(raw.detectedCars) && raw.detectedCars.length > 0;
-      const isMaintenance = raw.broken === true || raw.isUnderMaintenance === true;
-
-      return {
-        name: raw.name,
-        number: raw.number ?? (raw.name?.match(/^S(\d+)$/i) ? Number(raw.name.match(/^S(\d+)$/i)[1]) : null),
-        status: isMaintenance ? 'maintenance' : isOccupied ? 'occupied' : 'free',
-        zone: raw.zoneParent,
-        plate: isOccupied ? (raw.carPlateNumber || raw.CarPlateNumber || raw.currentCar || null) : null,
-        detectedCars: raw.detectedCars,
-        parkingForCarType: raw.parkingForCarType,
-        broken: raw.broken,
-        isUnderMaintenance: raw.isUnderMaintenance,
-        raw,
-      };
-    });
+    const rows = await request('/api/dashboard/spots');
+    return (Array.isArray(rows) ? rows : [])
+      .filter((spot) => spot.purpose === 'Park')
+      .map((spot) => ({
+        name: spot.name,
+        number: Number(spot.name.match(/\d+/)?.[0]) || null,
+        status: SPOT_STATUS[spot.status] || 'free',
+        zone: spot.zone,
+        plate: spot.current_car || null,
+        detectedCars: spot.status === 'OCCUPIED' ? 1 : 0,
+        parkingForCarType: spot.car_type,
+        broken: spot.broken,
+        isUnderMaintenance: spot.under_maintenance,
+        raw: spot,
+      }))
+      .sort((a, b) => a.zone.localeCompare(b.zone) || a.name.localeCompare(b.name, undefined, { numeric: true }));
   } catch (err) {
     console.warn('Failed to load parking spots:', err);
     return [];
   }
 }
 
+// "ZONE1" -> "Zone 1"
+function zoneLabel(zone) {
+  const match = String(zone || '').match(/^zone\s*(\d+)$/i);
+  return match ? `Zone ${match[1]}` : String(zone || 'Unassigned');
+}
+
 export function calculateZoneStats(spots = []) {
-  const zones = [
-    { name: 'Zone 1', total: 0, free: 0, occupied: 0, maintenance: 0 },
-    { name: 'Zone 2', total: 0, free: 0, occupied: 0, maintenance: 0 },
-    { name: 'Zone 3', total: 0, free: 0, occupied: 0, maintenance: 0 },
-  ];
-
+  // One card per zone that has spots (Level 1: 1 zone, Level 2: 3 zones)
+  const zones = new Map();
   spots.forEach((spot) => {
-    const zoneName = String(spot.zone || '').replace(/\s+/g, '').toUpperCase();
-    const zone = zones.find((z) => z.name.replace(/\s+/g, '').toUpperCase() === zoneName);
-
-    if (!zone) return;
-
+    const key = spot.zone || '';
+    if (!zones.has(key)) zones.set(key, { name: zoneLabel(key), zone: key, total: 0, free: 0, occupied: 0, maintenance: 0 });
+    const zone = zones.get(key);
     zone.total += 1;
-
-    if (spot.status === 'free') {
-      zone.free += 1;
-    } else if (spot.status === 'occupied') {
-      zone.occupied += 1;
-    } else if (spot.status === 'maintenance') {
-      zone.maintenance += 1;
-    }
+    if (spot.status === 'free') zone.free += 1;
+    else if (spot.status === 'occupied') zone.occupied += 1;
+    else zone.maintenance += 1;
   });
-
-  return zones;
+  return [...zones.values()].sort((a, b) => a.zone.localeCompare(b.zone, undefined, { numeric: true }));
 }
 
 /**
- * Fetch barrier gates (GateA and GateB)
+ * All barrier gates from the backend (GET /api/dashboard/gates): state, broken / maintenance, and
+ * role = entrance | exit (backend settings ENTRY_GATE / EXIT_GATE), entrances first.
  */
+const GATE_ROLE_ORDER = { entrance: 0, exit: 1 };
+
 export async function getBarriers() {
   try {
-    const data = await request('/list-barriers');
-    let rawList = [];
-    if (Array.isArray(data)) {
-      rawList = data;
-    } else if (data && typeof data === 'object') {
-      rawList = data.barriers || data.data || [];
-    }
-
-    const gateMap = new Map();
-    rawList.forEach((g) => {
-      const name = g.name || g.Name || g.gateName;
-      if (name && (typeof g.state === 'string' || typeof g.zoneParent === 'string')) {
-        gateMap.set(name.toUpperCase(), g);
-      }
-    });
-
-    const gateA = gateMap.get('GATEA') || {};
-    const gateB = gateMap.get('GATEB') || {};
-
-    return [
-      {
-        name: 'GateA',
-        title: 'Entrance Gate (Gate A)',
-        subtitle: 'Main vehicle entrance',
-        isOpen: gateA.isOpen === true || gateA.open === true || gateA.state === 'Open',
-        isBroken: gateA.isBroken === true || gateA.broken === true,
-      },
-      {
-        name: 'GateB',
-        title: 'Exit Gate (Gate B)',
-        subtitle: 'Main vehicle exit & cashier',
-        isOpen: gateB.isOpen === true || gateB.open === true || gateB.state === 'Open',
-        isBroken: gateB.isBroken === true || gateB.broken === true,
-      },
-    ].filter((gate) => gateMap.has(gate.name.toUpperCase()));
+    const rows = await request('/api/dashboard/gates');
+    return (Array.isArray(rows) ? rows : [])
+      .map((gate) => {
+        const role = gate.role || null;
+        const where = gate.zone ? zoneLabel(gate.zone) : 'Park';
+        return {
+          name: gate.name,
+          role,
+          zone: gate.zone,
+          state: gate.state,
+          title: role === 'entrance' ? `Entrance Gate (${gate.name})` : role === 'exit' ? `Exit Gate (${gate.name})` : `Gate ${gate.name}`,
+          subtitle: gate.broken ? `${where} · BROKEN` : gate.under_maintenance ? `${where} · under maintenance` : `${where} · ${gate.state}`,
+          isOpen: gate.state === 'Open' || gate.state === 'Opening',
+          isBroken: gate.broken === true || gate.under_maintenance === true,
+        };
+      })
+      .sort((a, b) => (GATE_ROLE_ORDER[a.role] ?? 2) - (GATE_ROLE_ORDER[b.role] ?? 2) || a.name.localeCompare(b.name, undefined, { numeric: true }));
   } catch (err) {
     console.warn('Failed to load barrier gates:', err);
     return [];
@@ -236,17 +236,19 @@ export async function getExhaustFans() {
   }
 }
 
+// CO per zone from the backend's CO controller (GET /co-status): no simulator call per refresh.
+// risk = the simulator's own rating (Safe < Mid < High < Critical); fans run from Mid until Safe again.
 export async function getZones() {
   try {
-    const data = await request('/list-zones');
-    const zones = Array.isArray(data) ? data : data?.zones || data?.data || data?.items || [];
-    return Array.isArray(zones)
-      ? zones.filter((zone) => zone && typeof zone === 'object' && zone.name).map((zone) => ({
-        name: zone.name,
-        gasCarbonMonoxideLevel: zone.gasCarbonMonoxideLevel,
-        risk: zone.risk,
-      }))
-      : [];
+    const zones = await request('/co-status');
+    return (Array.isArray(zones) ? zones : []).map((zone) => ({
+      name: zone.name,
+      gasCarbonMonoxideLevel: zone.gasCarbonMonoxideLevel,
+      risk: zone.risk,
+      ventilating: zone.ventilating === true,
+      fansOn: Array.isArray(zone.fansOn) ? zone.fansOn : [],
+      ventilateFrom: zone.ventilateFrom,
+    }));
   } catch {
     return [];
   }
@@ -409,19 +411,85 @@ export async function getHistorySessions(plate = '') {
 }
 
 export async function getPenalties() {
-  // TODO: Connect when a dedicated backend penalties endpoint provides amount and resolution status.
-  return [];
+  // Penalties are the simulator's own penalty events (stored by the backend)
+  const rows = await request('/api/penalties?limit=500');
+  return rows.map((row) => ({
+    id: row.id,
+    time: localTime(row.received_at),
+    type: row.type || '—',
+    description: row.reason || '—',
+    subject: row.component || row.car_plate || '—',
+    amount: row.fine_amount == null ? 0 : Number(row.fine_amount),
+    status: 'Recorded', // the simulator has no "resolved" state for a penalty
+  }));
+}
+
+// ---- Level 2: audit log, penalties, daily report (backend: /api/audit, /api/penalties, /api/logs) ----
+
+// Backend times are UTC without a zone marker: show them in local time
+function localTime(value) {
+  if (!value) return '—';
+  const date = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function describeDetails(details) {
+  if (details == null) return '—';
+  if (typeof details !== 'object') return String(details);
+  return Object.entries(details)
+    .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : typeof value === 'object' ? JSON.stringify(value) : value}`)
+    .join('; ');
 }
 
 export async function getAuditLogs() {
-  // TODO: Connect to a dedicated backend audit endpoint when available.
-  return [];
+  // Admin only: an Operator gets 403, shown as an empty list
+  const rows = await request('/api/audit?limit=200');
+  return rows.map((row) => ({
+    id: row.id,
+    time: localTime(row.created_at),
+    category: row.actor ? 'user' : 'system',
+    source: row.actor || 'System',
+    action: row.action,
+    target: [row.target_type, row.target_name].filter(Boolean).join(' ') || '—',
+    details: describeDetails(row.details),
+    result: row.success ? 'Success' : 'Failed',
+  }));
 }
 
+const EVENT_CATEGORY = [
+  [/^CAR_/, 'Vehicle'],
+  [/^PENALTY$/, 'Penalty'],
+  [/^COMPONENT_|^MAINTENANCE_|^AUTO_REPAIR/, 'Component'],
+  [/^CO_ALERT$/, 'Alert'],
+];
+const EVENT_STATUS = { PENALTY: 'penalty', CO_ALERT: 'alert', COMPONENT_BROKEN: 'warning', HANDLER_ERROR: 'warning' };
+
 export async function getDailyReport(date) {
-  // TODO: Connect to a backend daily reporting endpoint when available.
-  void date;
-  return null;
+  // date = 'YYYY-MM-DD'; the backend groups events by UTC day
+  const [summary, events, dashboard] = await Promise.all([
+    request(`/api/logs/daily-summary?day=${encodeURIComponent(date)}`),
+    request(`/api/logs/events?since=${date}T00:00:00&until=${date}T23:59:59&limit=200`),
+    date === new Date().toISOString().slice(0, 10) ? request('/api/dashboard').catch(() => null) : null,
+  ]);
+  const occupied = dashboard?.zones?.reduce((total, zone) => total + zone.occupied + zone.reserved, 0);
+  return {
+    vehiclesEntered: summary.cars_arrived,
+    vehiclesExited: summary.cars_departed,
+    peakOccupancy: '—', // not recorded yet
+    currentOccupancy: occupied ?? 'Unavailable',
+    operationalAlerts: summary.co_alerts,
+    componentFailures: summary.components_broken,
+    maintenanceActions: summary.components_fixed,
+    penalties: summary.penalties,
+    events: events.map((event) => ({
+      id: event.id,
+      time: localTime(event.event_time),
+      category: (EVENT_CATEGORY.find(([pattern]) => pattern.test(event.event_type)) || [null, 'System'])[1],
+      event: event.event_type.replaceAll('_', ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase()),
+      location: event.parking_spot || event.gate_name || event.car_plate || '—',
+      status: EVENT_STATUS[event.event_type] || 'ok',
+    })),
+  };
 }
 
 export async function getFinancialReport(date) {
@@ -469,57 +537,35 @@ export async function deleteUser(id) {
  * Authentication with roles (Admin / Operator)
  */
 export async function loginUser(username, password) {
-  // 1. Try MySQL backend JWT authentication
-  try {
-    const formData = new URLSearchParams();
-    formData.append('username', username);
-    formData.append('password', password);
+  // The backend is the only authority: it checks the password, records the attempt (success or
+  // failure) and returns the user's last 3 login attempts, shown after login.
+  const formData = new URLSearchParams();
+  formData.append('username', username);
+  formData.append('password', password);
 
-    const res = await fetch(`${BACKEND_BASE}/api/auth/login`, {
+  let res;
+  try {
+    res = await fetch(`${BACKEND_BASE}/api/auth/login`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'ngrok-skip-browser-warning': '1' },
       body: formData,
     });
-
-    if (res.ok) {
-      const data = await res.json();
-      if (data.access_token) {
-        localStorage.setItem('token', data.access_token);
-      }
-      return {
-        username,
-        name: username === 'admin' ? 'Administrator' : username,
-        role: data.role || (username === 'admin' ? 'Admin' : 'Operator'),
-        status: 'Active',
-      };
-    }
   } catch {
-    // fallback
+    throw new Error('Cannot reach the server. Is the backend running?');
   }
 
-  // 2. Built-in system roles fallback
-  if (username === 'admin' && (password === 'admin' || password === 'change-me')) {
-    return {
-      username: 'admin',
-      name: 'Administrator',
-      role: 'Admin',
-      status: 'Active',
-    };
-  } else if (username === 'jlim' && password === '1234') {
-    return {
-      username: 'jlim',
-      name: 'Jackson Lim',
-      role: 'Operator',
-      status: 'Active',
-    };
-  } else if (password === 'operator') {
-    return {
-      username,
-      name: username,
-      role: 'Operator',
-      status: 'Active',
-    };
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(typeof data.detail === 'string' ? data.detail : 'Invalid username or password.');
   }
-
-  throw new Error('Invalid username or password.');
+  if (data.access_token) {
+    localStorage.setItem('token', data.access_token);
+  }
+  return {
+    username,
+    name: username === 'admin' ? 'Administrator' : username,
+    role: data.role || 'Operator',
+    status: 'Active',
+    loginAttempts: Array.isArray(data.login_attempts) ? data.login_attempts : [],
+  };
 }

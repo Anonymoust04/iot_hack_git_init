@@ -24,6 +24,7 @@ from sqlalchemy.exc import OperationalError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.api.routes import auth, control, dashboard, history  # noqa: E402
+from app.api.routes import audit, event_log, login_attempts, penalties  # noqa: E402  (Level 2)
 from app.config import get_settings  # noqa: E402
 from app.db.init_db import apply_schema, check_schema, seed_admin  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
@@ -46,6 +47,9 @@ def setup(app: FastAPI) -> None:
         allow_headers=["*"],
     )
     for r in (auth.router, dashboard.router, control.router, history.router):
+        app.include_router(r)
+    # Level 2: /api/auth/login-attempts, /api/audit, /api/penalties, /api/logs
+    for r in (login_attempts.router, audit.router, penalties.router, event_log.router):
         app.include_router(r)
     app.add_exception_handler(OperationalError, _database_unreachable)
     app.add_api_route("/health", lambda: {"status": "ok"}, methods=["GET"], tags=["meta"])

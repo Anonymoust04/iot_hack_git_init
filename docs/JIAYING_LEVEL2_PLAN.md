@@ -4,6 +4,61 @@ My area: operational event logging, login attempts, audit logs, penalties, and t
 FastAPI wiring (`main.py`, `db_hook.py`, `auth.py`) is **Zhi Hong's**: I only send him handoff snippets.
 Team rules: [LEVEL2_TASKS.md](LEVEL2_TASKS.md).
 
+## Current verification checklist — 2026-09-20
+
+This checklist supersedes the older handoff assumptions below. It records what was checked against the
+running browser app, FastAPI instance, and simulator on 2026-09-20. A checked item means the surface was
+observed or exercised; it does not mean every failure-mode requirement is complete.
+
+### Verified live
+
+- [x] `http://127.0.0.1:8000/health` responds `200` with `{"status":"ok"}`.
+- [x] FastAPI Swagger loads and exposes login attempts, dashboard, control, audit, penalties, and logs routes.
+- [x] Browser login succeeds with the configured admin account.
+- [x] Browser login response/UI shows the latest three login attempts.
+- [x] Frontend routes render: dashboard, vehicles, penalties, audit, reports, and admin users.
+- [x] Simulator login succeeds with `admin` / `admin`.
+- [x] Simulator returns parking spots, barriers, lights, exhaust fans, zones, and alarms.
+- [x] Simulator reports three zones and live CO readings; it currently reports maintenance alarms for `gate3` and `gate5`.
+- [x] `npm run build` succeeds for the frontend.
+
+### Partially working or currently failing live
+
+- [ ] Dashboard live integration is not verified: the browser currently displays `System Offline`, unavailable
+  component data, and unavailable CO data despite the backend health endpoint and simulator being reachable.
+- [ ] Admin user directory is not verified: the page remains on `REFRESHING...` / loading instead of showing users.
+- [ ] The simulator returns a high numeric CO reading for Zone 1 while its risk label is `Safe`; threshold/risk
+  consistency needs checking.
+- [ ] Current database-focused test rerun was blocked by MySQL error `2013 Lost connection to MySQL server during query`
+  while dropping `user_permissions`; this is an environment failure, not a passing test result.
+- [ ] Earlier integration tests still need repair: gate role inference, webhook response `queued` versus `dispatched`,
+  and the gate-operability fixture/safety path.
+
+### Still not complete
+
+- [ ] Strict signed-only webhook enforcement: `webhook_require_signature` still defaults to `False`, so missing
+  signatures are accepted by default.
+- [ ] Audit call-site integration for gate/control/repair actions, user changes, fan/light actions, and automation.
+- [ ] Financial report backend and frontend integration: `getFinancialReport()` still returns `null`.
+- [ ] Usage-cycle monitoring for parking spots, durable cycle history, and threshold-based maintenance scheduling.
+- [ ] Complete failure recovery for every component type, including durable maintenance state and repair outcomes.
+- [ ] Complete RBAC protection for simulator routes in `main.py`, especially direct movement, charging, and component routes.
+- [ ] Frontend permission-based hiding/enforcement using effective per-user permissions rather than only local role checks.
+- [ ] Complete manual-parking recovery: identify/register a car that entered without gate/spot events, estimate its
+  duration, charge it once, free the occupied spot, record the events, and route it safely through an exit.
+- [ ] Complete dynamic financial and operational reporting validation with live database data.
+
+### Recommended next checks
+
+- [ ] Restore a stable MySQL connection, then run `pytest -q` from `backend/` without treating skipped or setup-failed
+  database tests as passing.
+- [ ] In the browser, confirm `GET /api/dashboard`, `GET /api/auth/users`, `/api/penalties`, `/api/audit`, and
+  `/api/logs/daily-summary` after login, recording the HTTP status and response body for each.
+- [ ] Trigger one simulator component failure, repair it, and verify the dashboard state, database event, audit row,
+  and returned component state.
+- [ ] Send one missing-signature and one invalid-signature webhook, confirming both are rejected and logged.
+- [ ] Run the manual-parked-car scenario end to end and verify no duplicate charge or stale occupied spot remains.
+
 ## Progress checklist
 
 Check items off as they're actually done (files exist, tests really passed on MySQL — not `skipped`,
@@ -42,6 +97,11 @@ and it's committed). This is the one place to see what's left before the PR.
 - [x] Committed (`97c976f`, with Task A follow-up)
 
 ### Task D — User management + authorities (RBAC data)
+> **Update (combined branch):** Jackson's branch built user management + permissions too (`auth.py`,
+> `core/permissions.py`, `deps.py`), and the frontend uses it. To keep **one** permission system, my Task D API
+> (`services/user_admin.py`, `routes/admin_users.py`, `tests/test_admin_users.py`) was removed; `schema.sql` now has
+> one `user_permissions` table matching the merged model, and `init_db.upgrade_schema()` adds any missing columns to
+> an existing table on startup. The items below are kept as history (code in commit `44833b0`).
 - [x] Files created: `models/user_permission.py`, `services/user_admin.py`, `routes/admin_users.py`, `tests/test_admin_users.py`
 - [x] `user_permissions` table appended to `database/schema.sql` (no change to `users`: no reset needed)
 - [x] `init_db.py`: `user_permissions` added to the drop list before `users` (needed by the foreign key)

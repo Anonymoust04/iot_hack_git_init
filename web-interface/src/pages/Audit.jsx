@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getAuditLogs } from "../services/api";
+import { getAuditLogs, REFRESH_MS } from "../services/api";
 import "../styles/Audit.css";
 
 const filters = [
@@ -12,17 +12,24 @@ const filters = [
 function Audit() {
   const [events, setEvents] = useState([]);
   const [filter, setFilter] = useState("all");
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     let active = true;
-    getAuditLogs()
+    const load = () => getAuditLogs()
       .then((items) => {
-        if (active) setEvents(Array.isArray(items) ? items : []);
+        if (!active) return;
+        setEvents(Array.isArray(items) ? items : []);
+        setError(null);
       })
-      .catch(() => {
-        if (active) setEvents([]);
+      .catch((err) => {
+        if (!active) return;
+        // 403 = Operator: the audit log is Admin only
+        setError(/403|forbidden|role/i.test(err.message) ? "Admin access required to view the audit log." : err.message);
       });
-    return () => { active = false; };
+    load();
+    const interval = setInterval(load, REFRESH_MS);   // keep it live, like the dashboard
+    return () => { active = false; clearInterval(interval); };
   }, []);
 
   const isUserAction = (event) => event.category?.toLowerCase() === "user";
@@ -87,7 +94,7 @@ function Audit() {
               </tbody>
             </table>
           </div>
-        ) : <p className="audit-empty">{events.length ? "No events match this filter" : "No audit events recorded"}</p>}
+        ) : <p className="audit-empty">{error || (events.length ? "No events match this filter" : "No audit events recorded yet")}</p>}
       </section>
     </div>
   );

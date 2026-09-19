@@ -11,7 +11,7 @@ Key behaviours
 - Vehicle-type-aware spot selection (Electric -> EV spots, Accessible -> Accessible spots)
 - Re-entry guard: rerouted cars arriving at the correct gate are let through immediately
 - Fee charged only after the car has confirmed physically parked (Park/CarIn event)
-- CO > 20 ppm in any zone -> all fans in that zone activated
+- CO risk Mid/High/Critical in a zone -> its working fans ON; back to Safe -> OFF (webhooks + list-zones check)
 - Day/Night light control (daytime 06:00-18:00 -> lights OFF; night -> lights ON)
 - Preventive maintenance: polls list-alarms every 5 s and repairs idle components
 - Usage cycle tracking: polls every 30 s and logs component cycle counts
@@ -49,7 +49,9 @@ db_hook.setup(app)
 # CONFIGURATION CONSTANTS
 # -------------------------------------------------
 
-SIMULATOR_URL      = "http://127.0.0.1:9898"
+# SIM_BASE_URL in .env (e.g. http://127.0.0.1:9898/api/v1); tests point it elsewhere so they never
+# drive the real simulator
+SIMULATOR_URL      = str(getattr(get_settings(), "sim_base_url", "http://127.0.0.1:9898/api/v1")).rstrip("/").removesuffix("/api/v1")
 SIMULATOR_EMAIL    = "admin"
 SIMULATOR_PASSWORD = "admin"
 
@@ -302,7 +304,48 @@ async def dedicated_exit_gate_worker(gate_name: str, queue: asyncio.Queue):
 # CO MONITORING & FAN AUTOMATION
 # -------------------------------------------------
 
-async def auto_activate_fans_for_zone(zone_name: str):
+# The simulator rates each zone's CO itself: Safe < Mid < High < Critical (webhook "DangerLevel",
+# list-zones "risk"). It only sends CO webhooks from Mid upward; ~50 ppm is Mid (hackathon docs).
+# Rule: Mid / High / Critical -> every working fan in that zone ON; back to Safe -> those fans OFF.
+CO_RISK_ORDER      = {"Safe": 0, "Mid": 1, "High": 2, "Critical": 3}
+CO_VENTILATE_FROM  = "Mid"
+CO_MID_PPM         = 50.0   # only used if a reading arrives without a risk label
+CO_CHECK_ACTIVE_S  = 20     # re-check list-zones this often while any zone is ventilating
+CO_CHECK_IDLE_S    = 60     # ...and this often otherwise (list-* calls have a simulated cost)
+
+zone_co: dict[str, dict] = {}   # zone -> {"ppm", "risk", "ventilating", "updated", "fans_on"}
+_co_lock = asyncio.Lock()
+
+
+def co_needs_ventilation(risk: str | None, ppm: float | None) -> bool:
+    if risk in CO_RISK_ORDER:
+        return CO_RISK_ORDER[risk] >= CO_RISK_ORDER[CO_VENTILATE_FROM]
+    return ppm is not None and ppm >= CO_MID_PPM
+
+
+async def audit_system(action: str, target_type: str, target_name: str, success: bool = True, **details):
+    """Audit log entry for something the system did by itself (no operator): actor stays empty."""
+    try:
+        from app.services.audit import record_audit_async
+        await record_audit_async(action, target_type=target_type, target_name=target_name,
+                                 success=success, details=details or None)
+    except Exception as e:
+        print(f"[AUDIT] not written ({action} {target_name}): {e}")
+
+
+async def _audit_fans(zone: str, action: str, names: list, risk, ppm, failed: dict):
+    try:
+        from app.services.audit import record_audit_async
+        for name in names:
+            error = failed.get(name)
+            await record_audit_async(action, target_type="fan", target_name=name, success=error is None,
+                                     details={"zone": zone, "co_ppm": ppm, "risk": risk, **({"error": error} if error else {})})
+    except Exception as e:
+        print(f"[CO VENTILATION] audit not written: {e}")
+
+
+async def ventilate_zone(zone_name: str, on: bool, risk=None, ppm=None):
+    """Switch every working fan of the zone ON (or OFF); skips fans already in that state."""
     try:
         fans = await call_simulator_api("list-exhaust-fans")
         if not isinstance(fans, list):
@@ -310,22 +353,65 @@ async def auto_activate_fans_for_zone(zone_name: str):
         target = [
             f for f in fans
             if str(f.get("zoneParent") or "").upper() == zone_name.upper()
-            and not f.get("isOn", False)
+            and bool(f.get("isOn", False)) != on
             and not f.get("broken", False)
             and not f.get("isUnderMaintenance", False)
             and f.get("name")
+            and await is_component_operable(f["name"])
         ]
+        zone_fans = [f.get("name") for f in fans if str(f.get("zoneParent") or "").upper() == zone_name.upper()]
         if not target:
-            print(f"[CO VENTILATION] No eligible fans in {zone_name}.")
+            if on and not zone_fans:
+                print(f"[CO VENTILATION] No fans in {zone_name}.")
             return
-        print(f"[CO VENTILATION] Activating {len(target)} fan(s) in {zone_name}: {[f['name'] for f in target]}")
-        await asyncio.gather(*[
-            call_simulator_api(f"exhaust-fans/{f['name']}/on", method="POST")
-            for f in target
-        ])
-        print(f"[CO VENTILATION] All fans in {zone_name} activated.")
+        names = [f["name"] for f in target]
+        print(f"[CO VENTILATION] {zone_name} ({risk}, {ppm} ppm): fans {'ON' if on else 'OFF'} {names}")
+        results = await asyncio.gather(*[
+            call_simulator_api(f"exhaust-fans/{n}/{'on' if on else 'off'}", method="POST") for n in names
+        ], return_exceptions=True)
+        failed = {n: str(r) for n, r in zip(names, results) if isinstance(r, Exception)}
+        for n, err in failed.items():
+            print(f"[CO VENTILATION ERROR] {n}: {err}")
+        zone_co.setdefault(zone_name, {})["fans_on"] = [n for n in names if n not in failed] if on else []
+        asyncio.create_task(_audit_fans(zone_name, "AUTO_FAN_ON" if on else "AUTO_FAN_OFF", names, risk, ppm, failed))
     except Exception as e:
         print(f"[CO VENTILATION ERROR] {zone_name}: {e}")
+
+
+async def update_zone_co(zone_name: str, ppm, risk):
+    """New CO reading (webhook or list-zones): switch fans when the zone crosses the Mid line."""
+    if not zone_name:
+        return
+    try:
+        ppm = round(float(ppm), 2) if ppm is not None else None
+    except (TypeError, ValueError):
+        ppm = None
+    need = co_needs_ventilation(risk, ppm)
+    async with _co_lock:
+        state = zone_co.setdefault(zone_name, {"ventilating": False, "fans_on": []})
+        was = state.get("ventilating", False)
+        state.update(ppm=ppm, risk=risk, updated=time.time(), ventilating=need)
+    if need:
+        # also re-run while ventilating: a fan repaired / turned off by maintenance goes back ON
+        await ventilate_zone(zone_name, True, risk, ppm)
+    elif was:
+        await ventilate_zone(zone_name, False, risk, ppm)
+
+
+async def co_monitor_worker():
+    """Backup for webhooks: reads list-zones, catches missed alerts and turns fans off once Safe."""
+    print("[CO MONITOR] Started (ventilate from Mid; off when Safe).")
+    while True:
+        try:
+            zones = await call_simulator_api("list-zones")
+            if isinstance(zones, list):
+                for z in zones:
+                    if isinstance(z, dict) and z.get("name"):
+                        await update_zone_co(z["name"], z.get("gasCarbonMonoxideLevel"), z.get("risk"))
+        except Exception as e:
+            print(f"[CO MONITOR ERROR] {e}")
+        active = any(v.get("ventilating") for v in zone_co.values())
+        await asyncio.sleep(CO_CHECK_ACTIVE_S if active else CO_CHECK_IDLE_S)
 
 
 # -------------------------------------------------
@@ -396,8 +482,10 @@ async def _maintain_spot(name: str):
     component_health[name] = {"broken": False, "under_maintenance": True}
     try:
         await call_simulator_api(f"parking-spots/{name}/repair", method="POST")
+        await audit_system("AUTO_REPAIR", "spot", name, reason="preventive maintenance (usage cycles)")
     except Exception as err:
         print(f"[PREEMPTIVE MAINTENANCE ERROR] Spot {name}: {err}")
+        await audit_system("AUTO_REPAIR", "spot", name, success=False, error=str(err)[:200])
         async with spot_lock:
             parking_spots[name] = True
 
@@ -410,8 +498,10 @@ async def _maintain_gate(name: str):
     component_health[name] = {"broken": False, "under_maintenance": True}
     try:
         await call_simulator_api(f"barrier-gates/{name}/repair", method="POST")
+        await audit_system("AUTO_REPAIR", "gate", name, reason="preventive maintenance (usage cycles)")
     except Exception as err:
         print(f"[PREEMPTIVE MAINTENANCE ERROR] Gate {name}: {err}")
+        await audit_system("AUTO_REPAIR", "gate", name, success=False, error=str(err)[:200])
 
 
 async def _maintain_fan(name: str):
@@ -420,8 +510,10 @@ async def _maintain_fan(name: str):
     try:
         await call_simulator_api(f"exhaust-fans/{name}/off",    method="POST")
         await call_simulator_api(f"exhaust-fans/{name}/repair", method="POST")
+        await audit_system("AUTO_REPAIR", "fan", name, reason="preventive maintenance (usage cycles)")
     except Exception as err:
         print(f"[PREEMPTIVE MAINTENANCE ERROR] Fan {name}: {err}")
+        await audit_system("AUTO_REPAIR", "fan", name, success=False, error=str(err)[:200])
 
 
 async def auto_preemptive_maintenance_worker():
@@ -689,6 +781,7 @@ async def startup_event():
         asyncio.create_task(dedicated_exit_gate_worker(g, gate_queues[g]))
     asyncio.create_task(auto_preemptive_maintenance_worker())
     asyncio.create_task(auto_light_controller_worker())
+    asyncio.create_task(co_monitor_worker())
     asyncio.create_task(usage_cycle_tracker_worker())
     print("[STARTUP] Closing all 6 gates...")
     try:
@@ -762,11 +855,10 @@ async def webhook(request: Request):
 
     elif event_class in ("carbon_monoxide_event","carbon_monoxide_level_change"):
         zone_name = data.get("ZoneName","ZONE1")
-        co_level  = float(data.get("CarbonMonoxideLevel", 0) or 0)
-        print(f"[CO] Zone {zone_name}: {co_level} ppm")
-        if co_level > 20:
-            print(f"[CO THRESHOLD] {co_level} ppm > 20 in {zone_name} -> activating fans.")
-            asyncio.create_task(auto_activate_fans_for_zone(zone_name))
+        co_level  = data.get("CarbonMonoxideLevel")
+        danger    = data.get("DangerLevel")   # Safe / Mid / High / Critical (webhooks come from Mid up)
+        print(f"[CO] Zone {zone_name}: {co_level} ppm, {danger}")
+        asyncio.create_task(update_zone_co(zone_name, co_level, danger))
 
     elif event_class == "penalty":
         print(f"[PENALTY] {data.get('CarPlateNumber')}: {data.get('Reason')} - ${data.get('FineAmount')}")
@@ -906,6 +998,17 @@ def get_recent_activity(limit: int = 25):
         if len(items) >= limit:
             break
     return items
+
+
+@app.get("/co-status")
+async def co_status():
+    """Latest CO reading per zone as the controller sees it (no simulator call)."""
+    return [
+        {"name": zone, "gasCarbonMonoxideLevel": v.get("ppm"), "risk": v.get("risk"),
+         "ventilating": v.get("ventilating", False), "fansOn": v.get("fans_on", []),
+         "updated": v.get("updated"), "ventilateFrom": CO_VENTILATE_FROM}
+        for zone, v in sorted(zone_co.items())
+    ]
 
 
 @app.get("/system-status")

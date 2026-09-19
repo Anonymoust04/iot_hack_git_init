@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models import CarType, Event, GateState
 from app.services import components, parking
+from app.services.audit import record_audit
 from app.services.parking import log_event
 
 log = logging.getLogger(__name__)
@@ -181,12 +182,26 @@ def on_gate_action(db: Session, payload: dict) -> None:
     components.set_gate_state(db, payload["Name"], GateState(payload["Action"]))
 
 
+COMPONENT_TARGETS = {"BarrierGate": "gate", "ParkingSpot": "spot", "ExhaustFan": "fan", "Light": "light"}
+
+
+def _audit_component(db: Session, payload: dict, broken: bool) -> None:
+    """System event in the audit log: the simulator reported a component broken / fixed."""
+    kind = payload.get("Type", "")
+    record_audit(db, "COMPONENT_BROKEN" if broken else "COMPONENT_FIXED",
+                 target_type=COMPONENT_TARGETS.get(kind, (kind or "component").lower()),
+                 target_name=payload.get("Name"), success=not broken,
+                 details={k: payload[k] for k in ("Type", "FineAmount", "RepairCost") if k in payload} or None)
+
+
 def on_component_broken(db: Session, payload: dict) -> None:
     components.set_broken(db, payload.get("Type", ""), payload["Name"], True, raw_data=payload)
+    _audit_component(db, payload, broken=True)
 
 
 def on_component_fixed(db: Session, payload: dict) -> None:
     components.set_broken(db, payload.get("Type", ""), payload["Name"], False, raw_data=payload)
+    _audit_component(db, payload, broken=False)
 
 
 def on_penalty(db: Session, payload: dict) -> None:

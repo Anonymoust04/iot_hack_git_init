@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { getVehicleDetails, sendCarToDestination, chargeCar } from "../services/api";
+import { getVehicleDetails, sendCarToDestination, chargeCar, getParkingSpots } from "../services/api";
 
 function VehicleDetails() {
   const { plateNumber } = useParams();
@@ -12,6 +12,11 @@ function VehicleDetails() {
   const [parkingCost, setParkingCost] = useState("5.00");
   const [actionFeedback, setActionFeedback] = useState(null);
   const [actionLoading, setActionLoading] = useState(false);
+  // Only FREE spots can be offered: sending a car to an occupied spot is a simulator penalty
+  const [freeSpots, setFreeSpots] = useState([]);
+  useEffect(() => {
+    getParkingSpots().then((spots) => setFreeSpots(spots.filter((spot) => spot.status === "free")));
+  }, []);
 
   const loadVehicle = async () => {
     setLoading(true);
@@ -190,9 +195,9 @@ function VehicleDetails() {
                 }}
               >
                 <option value="leavepark">leavepark (Exit Car Park)</option>
-                {Array.from({ length: 30 }, (_, i) => `S${i + 1}`).map((s) => (
-                  <option key={s} value={s}>
-                    Spot {s}
+                {freeSpots.map((spot) => (
+                  <option key={spot.name} value={spot.name}>
+                    Spot {spot.name} ({spot.zone}{spot.parkingForCarType && spot.parkingForCarType !== "Any" ? `, ${spot.parkingForCarType}` : ""})
                   </option>
                 ))}
               </select>

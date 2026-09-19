@@ -15,9 +15,9 @@ FRONTEND_ORIGIN = "http://localhost:5173"  # `npm run dev`
 @pytest.fixture
 def park(db):
     upsert_parking_spots(db, [spot("S1"), spot("S2"), spot("ENTRY1", purpose="EntrySpot")])
-    upsert_gates(db, [{"name": "gateA", "zoneParent": "ZONE1", "state": "Open"},
-                      {"name": "gateB", "zoneParent": "ZONE1", "state": "Closed", "broken": True},
-                      {"name": "gateC", "zoneParent": "", "state": "Open"}])
+    upsert_gates(db, [{"name": "gate1", "zoneParent": "ZONE1", "state": "Open"},
+                      {"name": "gate2", "zoneParent": "ZONE1", "state": "Closed", "broken": True},
+                      {"name": "gate7", "zoneParent": "", "state": "Open"}])
     db.commit()
     return db
 
@@ -59,7 +59,7 @@ def test_parking_spots(park, client, admin_headers):
 def test_gates_have_roles_and_can_be_controlled(park, client, admin_headers, monkeypatch):
     gates = client.get("/api/dashboard/gates", headers=admin_headers).json()
     assert all({"name", "role", "zone", "state", "broken", "under_maintenance"} <= g.keys() for g in gates)
-    assert {g["name"]: g["role"] for g in gates} == {"gateA": "entrance", "gateB": "exit", "gateC": None}
+    assert {g["name"]: g["role"] for g in gates} == {"gate1": "entrance", "gate2": "exit", "gate7": None}
 
     calls = []
 
@@ -74,12 +74,12 @@ def test_gates_have_roles_and_can_be_controlled(park, client, admin_headers, mon
             calls.append(("repair", name))
 
     monkeypatch.setattr(control, "get_simulator", lambda: FakeSim())
-    assert client.post("/api/control/gates/gateA/close", headers=admin_headers).status_code == 202
-    assert client.post("/api/control/gates/gateB/open", headers=admin_headers).status_code == 202
-    assert calls == [("close", "gateA"), ("open", "gateB")]
+    assert client.post("/api/control/gates/gate1/close", headers=admin_headers).status_code == 202
+    assert client.post("/api/control/gates/gate2/open", headers=admin_headers).status_code == 202
+    assert calls == [("close", "gate1"), ("open", "gate2")]
     # the dashboard shows the movement at once (the webhook later confirms Open / Closed)
     states = {g["name"]: g["state"] for g in client.get("/api/dashboard/gates", headers=admin_headers).json()}
-    assert (states["gateA"], states["gateB"]) == ("Closing", "Opening")
+    assert (states["gate1"], states["gate2"]) == ("Closing", "Opening")
 
 
 def test_simulator_refusal_is_a_readable_error(park, client, admin_headers, monkeypatch):
@@ -87,14 +87,14 @@ def test_simulator_refusal_is_a_readable_error(park, client, admin_headers, monk
 
     class RefusingSim:
         def open_gate(self, name):
-            request = httpx.Request("POST", "http://sim/barrier-gates/gateA/open")
+            request = httpx.Request("POST", "http://sim/barrier-gates/gate1/open")
             raise httpx.HTTPStatusError("broken", request=request,
                                         response=httpx.Response(400, text="Gate is broken", request=request))
 
         close_gate = repair_gate = open_gate
 
     monkeypatch.setattr(control, "get_simulator", lambda: RefusingSim())
-    r = client.post("/api/control/gates/gateA/open", headers=admin_headers)
+    r = client.post("/api/control/gates/gate1/open", headers=admin_headers)
     assert r.status_code == 502 and "Gate is broken" in r.json()["detail"]  # api.js shows `detail`
 
 

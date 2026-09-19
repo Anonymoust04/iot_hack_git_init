@@ -171,3 +171,66 @@ def test_record_audit_async_from_async_code(audit_db):
     assert saved is not None
     [row] = list_audit(audit_db)
     assert (row.actor, row.action, row.details["reason"]) == (None, "AUTO_REPAIR", "usage 950/1000 cycles")
+
+
+# ---- operator actions are audited (routes/control.py) -----------------------------
+
+def test_control_actions_are_audited(audit_db, monkeypatch):
+    """Gate / light / fan / spot commands record who did what, and failures are kept too."""
+    import httpx
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api.routes import control
+
+    calls = []
+
+    class FakeSim:
+        def __getattr__(self, name):
+            def call(*args):
+                calls.append((name, *args))
+                if args and args[0] == "gateBROKEN":
+                    request = httpx.Request("POST", "http://sim/x")
+                    raise httpx.HTTPStatusError("nope", request=request,
+                                                response=httpx.Response(400, text="Gate is broken", request=request))
+            return call
+
+    monkeypatch.setattr(control, "get_simulator", lambda: FakeSim())
+    for name, role in (("ctl_admin", Role.ADMIN),):
+        if audit_db.scalar(select(User).where(User.username == name)) is None:
+            audit_db.add(User(username=name, password_hash=hash_password("pw"), role=role))
+    audit_db.commit()
+    app = FastAPI()
+    app.include_router(control.router)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {create_access_token('ctl_admin', Role.ADMIN)}"}
+
+    assert client.post("/api/control/gates/gate1/open", headers=headers).status_code == 202
+    assert client.post("/api/control/fans/fan2/on", headers=headers).status_code == 202
+    assert client.post("/api/control/spots/S7/repair", headers=headers).status_code == 202
+    assert client.post("/api/control/gates/gateBROKEN/close", headers=headers).status_code == 502  # simulator refused
+
+    logged = [(a.action, a.target_type, a.target_name, a.actor, a.success) for a in list_audit(audit_db)]
+    assert logged == [
+        ("GATE_CLOSE", "gate", "gateBROKEN", "ctl_admin", False),
+        ("SPOT_REPAIR", "spot", "S7", "ctl_admin", True),
+        ("FAN_ON", "fan", "fan2", "ctl_admin", True),
+        ("GATE_OPEN", "gate", "gate1", "ctl_admin", True),
+    ]
+    failure = list_audit(audit_db)[0]
+    assert "Gate is broken" in failure.details["error"]
+    audit_db.execute(delete(User).where(User.username == "ctl_admin"))
+    audit_db.commit()
+
+
+def test_simulator_component_events_are_audited(audit_db):
+    """A component breaking / being fixed in the simulator is a system event (no actor)."""
+    from app.services.webhook_handlers import on_component_broken, on_component_fixed
+
+    on_component_broken(audit_db, {"EventClass": "component_broken", "Type": "BarrierGate", "Name": "gate3",
+                                   "FineAmount": "10.00"})
+    on_component_fixed(audit_db, {"EventClass": "component_fixed", "Type": "BarrierGate", "Name": "gate3",
+                                  "RepairCost": "10.00"})
+    logged = [(a.action, a.target_type, a.target_name, a.actor, a.success) for a in list_audit(audit_db)]
+    assert logged == [("COMPONENT_FIXED", "gate", "gate3", None, True),
+                      ("COMPONENT_BROKEN", "gate", "gate3", None, False)]

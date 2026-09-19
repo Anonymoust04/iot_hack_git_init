@@ -12,7 +12,6 @@
 -- Statements are separated by ";" at end of line — keep it that way (init_db splits on it).
 -- =====================================================================
 
-
 -- ---------------------------------------------------------------------
 -- users: dashboard logins (NOT simulator logins)
 -- ---------------------------------------------------------------------
@@ -27,19 +26,20 @@ CREATE TABLE IF NOT EXISTS users (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- ---------------------------------------------------------------------
--- user_permissions: explicit per-user access decisions for the dashboard.
--- A missing set of rows means the role defaults apply (backwards compatible
--- with existing Level 1 users). Once an admin saves permissions, all keys are
--- present and each is explicitly allowed or denied.
+-- user_permissions: per-user authorities (Level 2 RBAC), managed from the Admin page
+-- (app/api/routes/auth.py). ADMIN has every authority; an OPERATOR without rows gets the
+-- defaults in app/core/permissions.py; with rows, only the enabled ones count.
+-- Deleting a user removes their rows (ON DELETE CASCADE).
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS user_permissions (
     user_id     INT UNSIGNED NOT NULL,
-    permission  VARCHAR(64)  NOT NULL,
-    enabled     BOOLEAN      NOT NULL DEFAULT FALSE,
+    permission  VARCHAR(64)  NOT NULL,               -- USER_MANAGEMENT, FINANCIAL_REPORTS, GATE_CONTROL, ...
+    enabled     BOOLEAN      NOT NULL DEFAULT TRUE,
+    granted_by  VARCHAR(64)  NULL,                   -- admin username who set it
+    granted_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, permission),
     CONSTRAINT fk_user_permissions_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
 
 -- ---------------------------------------------------------------------
 -- parking_spots: latest known state of every spot.
@@ -72,7 +72,6 @@ CREATE TABLE IF NOT EXISTS parking_spots (
     KEY ix_parking_spots_current_car (current_car)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-
 -- ---------------------------------------------------------------------
 -- gates: latest known barrier state.
 -- Rows are UPSERTED from GET /api/v1/list-barriers at level start,
@@ -89,7 +88,6 @@ CREATE TABLE IF NOT EXISTS gates (
     PRIMARY KEY (id),
     UNIQUE KEY uq_gates_name (name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
 
 -- ---------------------------------------------------------------------
 -- parking_sessions: ONE ROW = ONE CAR VISIT. Never deleted (history).
@@ -119,7 +117,6 @@ CREATE TABLE IF NOT EXISTS parking_sessions (
     KEY ix_sessions_entry_time (entry_time),            -- history search by date
     KEY ix_sessions_exit_time (exit_time)               -- today's completed / revenue
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
 
 -- ---------------------------------------------------------------------
 -- events: audit log + dashboard activity feed.
@@ -188,18 +185,3 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     KEY ix_audit_logs_target (target_type, target_name)         -- "history of gateA"
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- ---------------------------------------------------------------------
--- user_permissions: extra authorities an Admin grants to a user (Level 2 RBAC).
--- ADMIN has every authority implicitly; rows here matter for OPERATOR users.
--- Names are checked in code (app/services/user_admin.py PERMISSIONS):
---   REPAIR, FINANCIAL_REPORT, GATE_CONTROL, LIGHT_CONTROL, FAN_CONTROL
--- Deleting a user removes their rows (ON DELETE CASCADE).
--- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS user_permissions (
-    user_id     INT UNSIGNED NOT NULL,
-    permission  VARCHAR(32)  NOT NULL,
-    granted_by  VARCHAR(64)  NULL,                 -- admin username who granted it
-    granted_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (user_id, permission),             -- one row per user + authority
-    CONSTRAINT fk_user_permissions_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

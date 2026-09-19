@@ -15,7 +15,8 @@ class Settings(BaseSettings):
     app_port: int = 8000
     cors_origins: str = "http://localhost:3000,http://localhost:5173,http://127.0.0.1:5173"
     # Also allowed: any port on this machine (Vite may pick 5174, or you open 127.0.0.1). Empty = off.
-    cors_origin_regex: str = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+    # + the frontend deployed on Vercel (https://<project>.vercel.app), so any way of starting the backend works
+    cors_origin_regex: str = r"https?://(localhost|127\.0\.0\.1)(:\d+)?|https://[a-z0-9-]+\.vercel\.app"
 
     # Simulator settings.json "ListenAddress" + /api/v1
     sim_base_url: str = "http://127.0.0.1:9898/api/v1"
@@ -35,9 +36,10 @@ class Settings(BaseSettings):
     # The simulator currently sends "Signature": null. false: accept unsigned webhooks (a WRONG
     # signature is still rejected). true: reject unsigned ones too (if a level starts signing).
     webhook_require_signature: bool = False
-    # Which barrier (GET /list-barriers) is the entrance / exit, so the dashboard can label them
-    entry_gate: str = "gateA"
-    exit_gate: str = "gateB"
+    # Which barriers (GET /list-barriers) are entrances / exits, so the dashboard can label them.
+    # Comma-separated. Defaults = the Level 2 park (same as ENTRANCE_GATES / EXIT_GATES in main.py).
+    entry_gate: str = "gate1,gate3,gate5"
+    exit_gate: str = "gate2,gate4,gate6"
 
     # MySQL (Aiven). Values come from .env, never hard-code them.
     db_host: str

@@ -5,7 +5,8 @@ import ParkingGrid from "../components/ParkingGrid";
 import GateControl from "../components/GateControl";
 import ParkComponentsControl from "../components/ParkComponentsControl";
 import RecentActivity from "../components/RecentActivity";
-import { getSystemStatus, getParkingSpots, getActiveCars, getBarrierHealthData, getLights, getExhaustFans, getAlarms, getZones, calculateZoneStats } from "../services/api";
+import LastLoginAttempts from "../components/LastLoginAttempts";
+import { getSystemStatus, getParkingSpots, getActiveCars, getBarrierHealthData, getLights, getExhaustFans, getAlarms, getZones, calculateZoneStats, isLastKnownOnline, REFRESH_MS } from "../services/api";
 
 const componentGroups = [
   { key: "spots", name: "Parking Spots", type: "Parking Spot" },
@@ -40,21 +41,22 @@ function sameZone(parent, name) {
     && parent.replace(/\s+/g, "").toLowerCase() === name.replace(/\s+/g, "").toLowerCase();
 }
 
-function Dashboard() {
-  const [stats, setStats] = useState({
-    totalSpaces: 90,
-    availableSpaces: null,
-    occupiedSpaces: null,
-    carsInside: null,
-  });
+// Last dashboard snapshot, kept while the app is open. Leaving for another page (Audit, Penalties...)
+// unmounts this one, so without it the dashboard would show "Unavailable" again until the next refresh.
+let lastSnapshot = null;
+const emptyStats = { totalSpaces: 90, availableSpaces: null, occupiedSpaces: null, carsInside: null };
+const emptyComponents = { barriers: [], lights: [], fans: [], alarms: [] };
 
-  const [spots, setSpots] = useState([]);
-  const [zoneStats, setZoneStats] = useState([]);
-  const [systemOnline, setSystemOnline] = useState(false);
-  const [alertsAvailable, setAlertsAvailable] = useState(false);
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const [components, setComponents] = useState({ barriers: [], lights: [], fans: [], alarms: [] });
-  const [zones, setZones] = useState([]);
+function Dashboard() {
+  const [stats, setStats] = useState(() => lastSnapshot?.stats ?? emptyStats);
+  const [spots, setSpots] = useState(() => lastSnapshot?.spots ?? []);
+  const [zoneStats, setZoneStats] = useState(() => lastSnapshot?.zoneStats ?? []);
+  // Start from the last known status (shared across pages): switching tabs must not flash "offline"
+  const [systemOnline, setSystemOnline] = useState(isLastKnownOnline);
+  const [alertsAvailable, setAlertsAvailable] = useState(() => lastSnapshot?.alertsAvailable ?? false);
+  const [lastUpdated, setLastUpdated] = useState(() => lastSnapshot?.lastUpdated ?? null);
+  const [components, setComponents] = useState(() => lastSnapshot?.components ?? emptyComponents);
+  const [zones, setZones] = useState(() => lastSnapshot?.zones ?? []);
 
   const worstCoZone = zones.filter((zone) => coReading(zone) !== null)
     .reduce((worst, zone) => !worst || coReading(zone) > coReading(worst) ? zone : worst, null);
@@ -136,25 +138,35 @@ function Dashboard() {
       const occupiedCount = spotList.filter((s) => s.status === "occupied").length;
       const availableCount = spotList.filter((s) => s.status === "free").length;
 
-      setStats({
+      const nextStats = {
         totalSpaces: isOnline && spotList.length ? spotList.length : 90,
         availableSpaces: isOnline && spotList.length ? availableCount : null,
         occupiedSpaces: isOnline && spotList.length ? occupiedCount : null,
         carsInside: isOnline ? Math.max(activeList.length, occupiedCount, sysStatus.cars_inside || 0) : null,
-      });
+      };
+      const nextComponents = isOnline ? { barriers, lights, fans, alarms } : emptyComponents;
+      const nextZoneStats = calculateZoneStats(isOnline ? spotList : []);
+      const nextUpdated = new Date().toLocaleTimeString();
 
+      setStats(nextStats);
       setSpots(isOnline ? spotList : []);
-      setComponents(isOnline ? { barriers, lights, fans, alarms } : { barriers: [], lights: [], fans: [], alarms: [] });
+      setComponents(nextComponents);
       setZones(isOnline ? zoneList : []);
-      setZoneStats(calculateZoneStats(isOnline ? spotList : []));
-      setLastUpdated(new Date().toLocaleTimeString());
+      setZoneStats(nextZoneStats);
+      setLastUpdated(nextUpdated);
+      if (isOnline) {
+        // remember it, so coming back from another page shows data at once
+        lastSnapshot = { stats: nextStats, spots: spotList, zoneStats: nextZoneStats, zones: zoneList,
+                         components: nextComponents, alertsAvailable: spotList.length > 0, lastUpdated: nextUpdated };
+      }
     } catch (err) {
       console.warn("Error refreshing dashboard:", err);
+      if (lastSnapshot) return;   // keep the last data on screen; the next refresh (3 s) tries again
       setSystemOnline(false);
       setAlertsAvailable(false);
-      setStats({ totalSpaces: 90, availableSpaces: null, occupiedSpaces: null, carsInside: null });
+      setStats(emptyStats);
       setSpots([]);
-      setComponents({ barriers: [], lights: [], fans: [], alarms: [] });
+      setComponents(emptyComponents);
       setZones([]);
       setZoneStats(calculateZoneStats([]));
       setLastUpdated(null);
@@ -163,7 +175,7 @@ function Dashboard() {
 
   useEffect(() => {
     fetchDashboardData();
-    const interval = setInterval(fetchDashboardData, 5000);
+    const interval = setInterval(fetchDashboardData, REFRESH_MS);   // VITE_REFRESH_MS, default 5 s
     return () => clearInterval(interval);
   }, []);
 
@@ -191,6 +203,8 @@ function Dashboard() {
           {systemOnline ? "System Online" : "System Offline"}
         </div>
       </header>
+
+      <LastLoginAttempts />
 
       {/* Full Car Park Warning */}
       {isCarParkFull && (
@@ -420,6 +434,9 @@ function Dashboard() {
                   <h3>{zone.name}</h3>
                   <p>CO Level: <strong>{reading === null ? "CO data unavailable" : `${reading} ppm`}</strong></p>
                   <p>Risk: <span className={`environment-risk environment-${riskStyle(zone.risk)}`}>{zone.risk || "Unavailable"}</span></p>
+                  <p>Auto ventilation: <strong className={zone.ventilating ? "environment-warning" : ""}>
+                    {zone.ventilating ? `ON (${zone.fansOn?.length ? zone.fansOn.join(", ") : "fans starting"})` : "Off"}
+                  </strong> <small>(auto from {zone.ventilateFrom || "Mid"} risk until Safe)</small></p>
                   <p>Ventilation: <strong>{zoneFans.length ? `Fans: ${runningFans.length} / ${zoneFans.length} Running` : "Fan data unavailable"}</strong></p>
                   {brokenFans.map((fan) => <p className="environment-fan-issue environment-critical" key={`broken-${fan.name}`}>{fan.name}: Broken</p>)}
                   {maintenanceFans.map((fan) => <p className="environment-fan-issue environment-warning" key={`maintenance-${fan.name}`}>{fan.name}: Under Maintenance</p>)}

@@ -1,10 +1,6 @@
 import { useState, useEffect } from 'react';
 import { getBarriers, openGate, closeGate, repairGate } from '../services/api';
 
-const gateLabels = [
-  { name: 'GateA', title: 'Entrance Gate (Gate A)', subtitle: 'Main vehicle entrance' },
-  { name: 'GateB', title: 'Exit Gate (Gate B)', subtitle: 'Main vehicle exit & cashier' },
-];
 
 function GateControl({ systemOnline = false }) {
   const [gates, setGates] = useState([]);
@@ -32,9 +28,8 @@ function GateControl({ systemOnline = false }) {
     return () => clearInterval(interval);
   }, [systemOnline]);
 
-  const displayGates = gateLabels.map((label) =>
-    systemOnline ? gates.find((gate) => gate.name === label.name) || label : label
-  );
+  // Every gate the backend knows (Level 2: 3 entrances, 3 exits + others), entrances first
+  const displayGates = systemOnline ? gates : [];
 
   const handleToggleGate = async (gateName, shouldOpen) => {
     setLoading((prev) => ({ ...prev, [gateName]: true }));
