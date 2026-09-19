@@ -1,0 +1,130 @@
+.penalties-page {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 40px 48px;
+  color: #172033;
+}
+
+.penalties-header {
+  margin-bottom: 30px;
+}
+
+.penalties-header h1 {
+  margin: 0 0 8px;
+  font-size: 32px;
+}
+
+.penalties-header p {
+  margin: 0;
+  color: #6b7280;
+}
+
+.penalties-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 20px;
+  margin-bottom: 28px;
+}
+
+.penalties-summary-card,
+.penalties-panel {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+.penalties-summary-card {
+  padding: 24px;
+}
+
+.penalties-summary-card span {
+  display: block;
+  margin-bottom: 12px;
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.penalties-summary-card strong {
+  font-size: 32px;
+}
+
+.penalties-summary-card.attention strong {
+  color: #b45309;
+}
+
+.penalties-summary-card.resolved strong {
+  color: #15803d;
+}
+
+.penalties-panel {
+  padding: 28px;
+}
+
+.penalties-panel h2 {
+  margin: 0 0 18px;
+  font-size: 21px;
+}
+
+.penalties-table-scroll {
+  overflow-x: auto;
+}
+
+.penalties-table {
+  width: 100%;
+  min-width: 780px;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.penalties-table th {
+  padding: 14px 12px;
+  text-align: left;
+  color: white;
+  background: #1e293b;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.penalties-table td {
+  padding: 16px 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.penalty-status {
+  display: inline-block;
+  padding: 5px 10px;
+  border-radius: 20px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.penalty-status.resolved {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.penalties-empty {
+  margin: 0;
+  padding: 36px 12px;
+  text-align: center;
+  color: #6b7280;
+}
+
+@media (max-width: 900px) {
+  .penalties-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 550px) {
+  .penalties-page {
+    padding: 25px;
+  }
+
+  .penalties-summary {
+    grid-template-columns: 1fr;
+  }
+}

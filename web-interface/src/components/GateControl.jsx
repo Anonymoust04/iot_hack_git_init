@@ -1,23 +1,28 @@
 import { useState, useEffect } from 'react';
 import { getBarriers, openGate, closeGate, repairGate } from '../services/api';
 
-function GateControl() {
-  const [gates, setGates] = useState([
-    { name: 'GateA', title: 'Entrance Gate (Gate A)', subtitle: 'Main vehicle entrance', isOpen: false, isBroken: false },
-    { name: 'GateB', title: 'Exit Gate (Gate B)', subtitle: 'Main vehicle exit & cashier', isOpen: false, isBroken: false },
-  ]);
+const gateLabels = [
+  { name: 'GateA', title: 'Entrance Gate (Gate A)', subtitle: 'Main vehicle entrance' },
+  { name: 'GateB', title: 'Exit Gate (Gate B)', subtitle: 'Main vehicle exit & cashier' },
+];
+
+function GateControl({ systemOnline = false }) {
+  const [gates, setGates] = useState([]);
 
   const [loading, setLoading] = useState({});
   const [actionFeedback, setActionFeedback] = useState({});
 
   const refreshGates = async () => {
+    if (!systemOnline) {
+      setGates([]);
+      return;
+    }
     try {
       const data = await getBarriers();
-      if (Array.isArray(data) && data.length > 0) {
-        setGates(data);
-      }
+      setGates(Array.isArray(data) ? data : []);
     } catch (err) {
       console.warn('Failed to fetch gate status:', err);
+      setGates([]);
     }
   };
 
@@ -25,7 +30,11 @@ function GateControl() {
     refreshGates();
     const interval = setInterval(refreshGates, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [systemOnline]);
+
+  const displayGates = gateLabels.map((label) =>
+    systemOnline ? gates.find((gate) => gate.name === label.name) || label : label
+  );
 
   const handleToggleGate = async (gateName, shouldOpen) => {
     setLoading((prev) => ({ ...prev, [gateName]: true }));
@@ -72,7 +81,8 @@ function GateControl() {
       </div>
 
       <div className="gate-grid">
-        {gates.map((gate) => {
+        {displayGates.map((gate) => {
+          const stateAvailable = systemOnline && gates.some((item) => item.name === gate.name);
           const isLoading = loading[gate.name];
           const isRepairing = loading[`${gate.name}_repair`];
           const feedback = actionFeedback[gate.name];
@@ -86,10 +96,10 @@ function GateControl() {
                 </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
-                  <span className={`gate-status ${gate.isOpen ? 'open' : 'closed'}`}>
-                    {gate.isOpen ? 'Open' : 'Closed'}
+                  <span className={`gate-status ${!stateAvailable ? 'unavailable' : gate.isOpen ? 'open' : 'closed'}`}>
+                    {!stateAvailable ? 'Unavailable' : gate.isOpen ? 'Open' : 'Closed'}
                   </span>
-                  {gate.isBroken && (
+                  {stateAvailable && gate.isBroken && (
                     <span style={{ fontSize: '0.75rem', color: '#ef4444', fontWeight: 600 }}>
                       ⚠️ Faulty
                     </span>
@@ -97,7 +107,7 @@ function GateControl() {
                 </div>
               </div>
 
-              {feedback && (
+              {stateAvailable && feedback && (
                 <div
                   style={{
                     fontSize: '0.8rem',
@@ -113,15 +123,15 @@ function GateControl() {
               <div style={{ display: 'flex', gap: '10px' }}>
                 <button
                   type="button"
-                  disabled={isLoading || isRepairing}
+                  disabled={!stateAvailable || isLoading || isRepairing}
                   className={`gate-button ${gate.isOpen ? 'close' : 'open'}`}
                   onClick={() => handleToggleGate(gate.name, !gate.isOpen)}
-                  style={{ flex: 1, cursor: isLoading ? 'wait' : 'pointer' }}
+                  style={{ flex: 1, cursor: !stateAvailable ? 'not-allowed' : isLoading ? 'wait' : 'pointer' }}
                 >
-                  {isLoading ? 'Processing...' : gate.isOpen ? 'Close Gate' : 'Open Gate'}
+                  {!stateAvailable ? 'Control Unavailable' : isLoading ? 'Processing...' : gate.isOpen ? 'Close Gate' : 'Open Gate'}
                 </button>
 
-                {gate.isBroken && (
+                {stateAvailable && gate.isBroken && (
                   <button
                     type="button"
                     disabled={isRepairing || isLoading}

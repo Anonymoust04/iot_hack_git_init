@@ -6,6 +6,9 @@ import Dashboard from "./pages/Dashboard.jsx";
 import Account from "./pages/Account.jsx";
 import VehicleSearch from "./pages/VehicleSearch.jsx";
 import VehicleDetails from "./pages/VehicleDetails.jsx";
+import Penalties from "./pages/Penalties.jsx";
+import Audit from "./pages/Audit.jsx";
+import Reports from "./pages/Reports.jsx";
 import Layout from "./components/Layout.jsx";
 
 function App() {
@@ -42,6 +45,36 @@ function App() {
           element={
             <Layout>
               <VehicleDetails />
+            </Layout>
+          }
+        />
+
+        {/* Penalties */}
+        <Route
+          path="/penalties"
+          element={
+            <Layout>
+              <Penalties />
+            </Layout>
+          }
+        />
+
+        {/* Audit */}
+        <Route
+          path="/audit"
+          element={
+            <Layout>
+              <Audit />
+            </Layout>
+          }
+        />
+
+        {/* Reports */}
+        <Route
+          path="/reports"
+          element={
+            <Layout>
+              <Reports />
             </Layout>
           }
         />

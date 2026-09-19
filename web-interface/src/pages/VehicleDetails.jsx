@@ -168,7 +168,7 @@ function VehicleDetails() {
           <h2>Direct Vehicle & Billing Actions</h2>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "20px", marginTop: "16px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))", gap: "20px", marginTop: "16px" }}>
           {/* Direct Car */}
           <div style={{ background: "#f8fafc", padding: "18px", borderRadius: "10px", border: "1px solid #e2e8f0" }}>
             <h3 style={{ margin: "0 0 10px", fontSize: "1rem" }}>Direct Car to Destination</h3>
@@ -176,7 +176,7 @@ function VehicleDetails() {
               Send vehicle to a designated spot or instruct it to leave the park.
             </p>
 
-            <div style={{ display: "flex", gap: "10px" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
               <select
                 value={destination}
                 onChange={(e) => setDestination(e.target.value)}
@@ -185,6 +185,7 @@ function VehicleDetails() {
                   borderRadius: "8px",
                   border: "1px solid #cbd5e1",
                   flex: 1,
+                  minWidth: 0,
                   fontSize: "0.9rem",
                 }}
               >
@@ -222,7 +223,7 @@ function VehicleDetails() {
               Charge the vehicle for its parking duration before exit.
             </p>
 
-            <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "10px", alignItems: "center" }}>
               <span style={{ fontWeight: 600, color: "#475569" }}>$</span>
               <input
                 type="number"
