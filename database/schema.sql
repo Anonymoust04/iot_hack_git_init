@@ -173,3 +173,19 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     KEY ix_audit_logs_action_time (action, created_at),         -- "all repairs today"
     KEY ix_audit_logs_target (target_type, target_name)         -- "history of gateA"
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- ---------------------------------------------------------------------
+-- user_permissions: extra authorities an Admin grants to a user (Level 2 RBAC).
+-- ADMIN has every authority implicitly; rows here matter for OPERATOR users.
+-- Names are checked in code (app/services/user_admin.py PERMISSIONS):
+--   REPAIR, FINANCIAL_REPORT, GATE_CONTROL, LIGHT_CONTROL, FAN_CONTROL
+-- Deleting a user removes their rows (ON DELETE CASCADE).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS user_permissions (
+    user_id     INT UNSIGNED NOT NULL,
+    permission  VARCHAR(32)  NOT NULL,
+    granted_by  VARCHAR(64)  NULL,                 -- admin username who granted it
+    granted_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, permission),             -- one row per user + authority
+    CONSTRAINT fk_user_permissions_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

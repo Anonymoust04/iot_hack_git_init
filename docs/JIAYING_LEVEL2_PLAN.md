@@ -24,7 +24,7 @@ and it's committed). This is the one place to see what's left before the PR.
 - [x] Tests pass on `carpark_test_audit` (12 passed, real Aiven MySQL)
 - [x] `tests/test_schema_matches_models.py` still passes (3 passed with the new table)
 - [x] Reviewed: `git status` shows only this task's files (+ Task B's, which belong to agent 2)
-- [ ] Committed
+- [x] Committed (`5df1eae`, with Task B)
 - [x] Handoff table written (see "Handoff: audit call sites" under Task A)
 
 ### Task B — Penalties page data (agent 2)
@@ -32,20 +32,20 @@ and it's committed). This is the one place to see what's left before the PR.
 - [x] No new table added (reads `events` where `event_type = 'PENALTY'`)
 - [x] Tests pass on `carpark_test_penalty` (6 passed)
 - [ ] Reviewed: `git status` shows only this task's files
-- [ ] Committed
+- [x] Committed (`5df1eae`, with Task A)
 
 ### Task C — Event log search + daily summary (agent 3)
 - [x] Files created: `services/event_log.py`, `routes/event_log.py`, `tests/test_event_log.py`, `docs/EVENT_TYPES.md`
 - [x] No new table added (reads existing `events`)
 - [x] Tests pass on `carpark_test_events` (5 passed on MySQL)
 - [ ] Reviewed: `git status` shows only this task's files
-- [ ] Committed
+- [x] Committed (`97c976f`, with Task A follow-up)
 
 ### Step 4 — Handoff & PR
-- [ ] Full suite passes together: `pytest` in `backend/` (real MySQL run, not skipped)
+- [ ] Full suite passes together: `pytest` in `backend/` (real MySQL run, not skipped) — latest isolated MySQL run: 52 passed, 6 failed, 14 errors; the test admin was not seeded after another Admin was created first
 - [ ] One handoff message sent to Zhi Hong: login route change, router registrations, audit call sites,
       endpoint list for Christen/Jackson
-- [ ] Pushed: `git push -u origin lvl2-db`
+- [x] Pushed: local `lvl2-db` and `origin/lvl2-db` match at `97c976f`
 - [ ] PR opened `lvl2-db → main` (merged by Zhi Hong, not by me)
 
 ---

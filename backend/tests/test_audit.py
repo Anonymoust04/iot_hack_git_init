@@ -40,7 +40,11 @@ def api(audit_db):
     client = TestClient(app)
     client.admin = {"Authorization": f"Bearer {create_access_token('audit_admin', Role.ADMIN)}"}
     client.operator = {"Authorization": f"Bearer {create_access_token('audit_op', Role.OPERATOR)}"}
-    return client
+    yield client
+    # remove them again: a leftover ADMIN makes the app skip seeding the default `admin` other tests log in with
+    audit_db.rollback()
+    audit_db.execute(delete(User).where(User.username.in_(["audit_admin", "audit_op"])))
+    audit_db.commit()
 
 
 def test_record_and_read_back(audit_db):

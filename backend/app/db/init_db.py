@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 
 SCHEMA_FILE = ROOT_DIR / "database" / "schema.sql"
 # Child tables first (foreign keys). Includes tables from the old scaffold so --reset cleans them.
-ALL_TABLES = ["events", "parking_sessions", "parking_spots", "gates", "users", "event_logs", "zones"]
+ALL_TABLES = ["events", "parking_sessions", "parking_spots", "gates", "user_permissions", "users", "event_logs", "zones"]
 
 
 def schema_statements() -> list[str]:
