@@ -345,20 +345,8 @@ async def process_car_exit(data: dict):
     # Step 1: Request Payment (Single-Charge Enforcement)
     if car_plate not in charged_cars:
         car_info = active_cars.get(car_plate, {})
-        duration = planned_duration
 
-        # Calculate duration from entry time if available
-        entry_time_str = car_info.get("entry_time")
-        if entry_time_str and server_time:
-            try:
-                fmt = "%Y-%m-%d %H:%M:%S"
-                dt_entry = datetime.strptime(entry_time_str, fmt)
-                dt_exit = datetime.strptime(server_time, fmt)
-                elapsed_minutes = (dt_exit - dt_entry).total_seconds() / 60.0
-                if elapsed_minutes > 0:
-                    duration = max(1.0, elapsed_minutes)
-            except Exception:
-                duration = car_info.get("planned_duration", planned_duration)
+        duration = car_info.get("planned_duration", planned_duration)
 
         # Parking Cost = Total minutes spent
         parking_cost = float(max(1, round(duration)))
