@@ -3,6 +3,7 @@ ParkingSimulator-win-x64/
 *.exe
 *.dll
 *.db
+.env
 
 # Python & Virtual Environments
 backend/fastapi-env/
