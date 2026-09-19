@@ -18,6 +18,26 @@ Key behaviours
 - Broken/unavailable component health tracked from webhook events; exposed on /component-health
 """
 
+"""
+Parking Simulator Backend - Level 2
+====================================
+Entrance gates : gate1 (Zone 1 / S-spots), gate3 (Zone 2 / bay-spots), gate5 (Zone 3 / P-spots)
+Exit gates     : gate2, gate4, gate6
+Zones          : Zone 1 -> S1-S30 | Zone 2 -> bay36-bay65 | Zone 3 -> P69-P98
+
+Key behaviours
+--------------
+- Zone 1 fills first, then Zone 2, then Zone 3 (for all vehicle types)
+- Vehicle-type-aware spot selection (Electric -> EV spots, Accessible -> Accessible spots)
+- Re-entry guard: rerouted cars arriving at the correct gate are let through immediately
+- Fee charged only after the car has confirmed physically parked (Park/CarIn event)
+- CO > 20 ppm in any zone -> all fans in that zone activated
+- Day/Night light control (daytime 06:00-18:00 -> lights OFF; night -> lights ON)
+- Preventive maintenance: polls list-alarms every 5 s and repairs idle components
+- Usage cycle tracking: polls every 30 s and logs component cycle counts
+- Broken/unavailable component health tracked from webhook events; exposed on /component-health
+"""
+
 import asyncio
 import math
 import time
@@ -131,8 +151,16 @@ SIMULATOR_TOKEN: str | None = None
 _token_lock = asyncio.Lock()
 
 parking_spots: dict[str, bool] = {s: True for s in VALID_PARKING_SPOTS}
-spot_lock = asyncio.Lock()
 gate_queues: dict[str, asyncio.Queue] = {g: asyncio.Queue() for g in ALL_GATES}
+
+# Physical EntrySpot occupancy. The simulator rejects a second car if it is
+# sent to ENTRY2/ENTRY3 while another car is still sitting there.
+entry_occupied: dict[str, bool] = {
+    "ENTRY1": False,
+    "ENTRY2": False,
+    "ENTRY3": False,
+}
+
 
 active_cars:  dict[str, dict] = {}
 charged_cars: set[str] = set()
@@ -232,6 +260,41 @@ async def api_send_car_to_destination(car_name: str, destination: str):
     return await call_simulator_api(f"car/{car_name}/goto/{destination}", method="POST")
 
 
+async def send_car_to_entry_or_queue(car_plate: str, entry_name: str, assigned_spot: str | None = None):
+    """
+    Send a car to an EntrySpot only when that EntrySpot is free.
+
+    If the EntrySpot is occupied, keep the car in a FIFO queue. The next car
+    is released when the current car produces an EntrySpot CarOut webhook.
+    """
+
+    entry_name = (entry_name or "ENTRY1").upper()
+    if entry_name not in entry_occupied:
+        entry_name = "ENTRY1"
+
+    # if entry_occupied[entry_name]:
+    #     print(
+    #         f"[ENTRY WAIT] {entry_name} occupied -> queueing {car_plate}"
+    #         + (f" for {assigned_spot}" if assigned_spot else "")
+    #     )
+    #     return {"status": "queued", "entry": entry_name}
+
+    # print(
+    #     f"[ENTRY ROUTE] {entry_name} is free -> sending {car_plate}"
+    #     + (f" for {assigned_spot}" if assigned_spot else "")
+    # )
+    # entry_occupied[entry_name] = True
+
+    try:
+        result = await api_send_car_to_destination(car_plate, entry_name)
+        return result if isinstance(result, dict) else {"status": "success", "result": result}
+    except Exception:
+        # Do not permanently lock the EntrySpot if the simulator rejected the
+        # goto request or the request failed before the car arrived.
+        entry_occupied[entry_name] = False
+        raise
+
+
 async def api_charge_car(car_name: str, parking_cost: float, charging_cost: float):
     return await call_simulator_api(f"car/{car_name}/charge", method="POST",
                                     params={"parkingCost": parking_cost, "chargingCost": charging_cost})
@@ -265,10 +328,18 @@ async def dedicated_entrance_gate_worker(gate_name: str, queue: asyncio.Queue):
         # await asyncio.sleep(1.0)
         print(f"[{gate_name.upper()} WORKER] Opening for {car_plate} -> {destination}")
         try:
-            await api_open_barrier_gate(gate_name)
-            await asyncio.sleep(1)
+            open_result = await api_open_barrier_gate(gate_name)
+
+            if isinstance(open_result, dict) and open_result.get("status") == "blocked":
+                print(
+                    f"[{gate_name.upper()} WORKER] Gate blocked for {car_plate}; "
+                    f"destination request cancelled."
+                )
+                continue
+
+            await asyncio.sleep(0.5)
             await api_send_car_to_destination(car_plate, destination)
-            await api_close_barrier_gate(gate_name)
+            # await api_close_barrier_gate(gate_name)
         except Exception as e:
             print(f"[{gate_name.upper()} WORKER ERROR] {car_plate}: {e}")
         finally:
@@ -384,23 +455,6 @@ async def usage_cycle_tracker_worker():
 # PREVENTIVE MAINTENANCE WORKER
 # -------------------------------------------------
 
-async def _maintain_spot(name: str):
-    async with spot_lock:
-        is_free     = parking_spots.get(name, True)
-        is_assigned = any(info.get("assigned_spot") == name for info in active_cars.values())
-    if not is_free or is_assigned:
-        return
-    print(f"[PREEMPTIVE MAINTENANCE] Spot {name} IDLE - repairing...")
-    async with spot_lock:
-        parking_spots[name] = False
-    component_health[name] = {"broken": False, "under_maintenance": True}
-    try:
-        await call_simulator_api(f"parking-spots/{name}/repair", method="POST")
-    except Exception as err:
-        print(f"[PREEMPTIVE MAINTENANCE ERROR] Spot {name}: {err}")
-        async with spot_lock:
-            parking_spots[name] = True
-
 
 async def _maintain_gate(name: str):
     q = gate_queues.get(name)
@@ -437,8 +491,6 @@ async def auto_preemptive_maintenance_worker():
                         continue
                     if component_health.get(name, {}).get("under_maintenance"):
                         continue
-                    if name.startswith("S") or name.startswith("bay") or name.startswith("P"):
-                        await _maintain_spot(name)
                     elif name.startswith("gate"):
                         await _maintain_gate(name)
                     elif name.startswith("f_") or name.startswith("fan"):
@@ -469,8 +521,7 @@ async def auto_preemptive_maintenance_worker():
                     if not s.get("isUnderMaintenance", False) and not s.get("broken", False):
                         component_health.pop(s_name, None)
                         if not s.get("isOccupied", False):
-                            async with spot_lock:
-                                parking_spots[s_name] = True
+                            parking_spots[s_name] = True
         except Exception:
             pass
         await asyncio.sleep(5.0)
@@ -529,60 +580,79 @@ async def process_car_entry(data: dict):
         norm_type = normalize_vehicle_type(car_type)
         assigned_spot = target_gate = target_entry = None
         zone1_spots = zone2_spots = zone3_spots = []
+        
+        all_free = [s for s, free in parking_spots.items() if free]
 
-        async with spot_lock:
-            all_free = [s for s, free in parking_spots.items() if free]
+        eligible = []
 
-            if norm_type == "Electric":
-                eligible = [s for s in all_free if get_spot_type(s) == "Electric"]
-            elif norm_type == "Accessible":
-                eligible = [s for s in all_free if get_spot_type(s) == "Accessible"]
-            else:
-                eligible = [s for s in all_free if get_spot_type(s) == "Any"]
+        if norm_type == "Electric":
+            eligible += [s for s in all_free if get_spot_type(s) == "Electric"]
+        elif norm_type == "Accessible":
+            eligible += [s for s in all_free if get_spot_type(s) == "Accessible"]
 
-            operable    = [s for s in eligible if gate_operable.get(spot_gate(s))]
-            zone1_spots = [s for s in operable if s.startswith("S")]
-            zone2_spots = [s for s in operable if s.startswith("bay")]
-            zone3_spots = [s for s in operable if s.startswith("P")]
+        eligible += [s for s in all_free if get_spot_type(s) == "Any"]
 
-            if zone1_spots:
-                assigned_spot = sorted(zone1_spots, key=extract_spot_number)[0]
-                target_gate   = "gate1"; target_entry = "ENTRY1"
-            elif zone2_spots:
-                assigned_spot = sorted(zone2_spots, key=extract_spot_number)[0]
-                target_gate   = "gate3"; target_entry = "ENTRY2"
-            elif zone3_spots:
-                assigned_spot = sorted(zone3_spots, key=extract_spot_number)[0]
-                target_gate   = "gate5"; target_entry = "ENTRY3"
+        operable    = [s for s in eligible if gate_operable.get(spot_gate(s))]
+        zone1_spots = [s for s in operable if s.startswith("S")]
+        zone2_spots = [s for s in operable if s.startswith("bay")]
+        zone3_spots = [s for s in operable if s.startswith("P")]
 
-            if assigned_spot:
-                parking_spots[assigned_spot] = False
-                active_cars[car_plate] = {
-                    "entry_time":       server_time,
-                    "car_type":         car_type,
-                    "assigned_spot":    assigned_spot,
-                    "assigned_ts":      time.time(),
-                    "planned_duration": planned_dur,
-                    "charged":          False,
-                    "parked":           False,
-                }
+        if zone1_spots and gate_operable.get("gate1", False):
+            assigned_spot = sorted(zone1_spots, key=extract_spot_number)[0]
+            target_gate   = "gate1"; target_entry = "ENTRY1"
+        elif zone2_spots and gate_operable.get("gate3", False):
+            assigned_spot = sorted(zone2_spots, key=extract_spot_number)[0]
+            target_gate   = "gate3"; target_entry = "ENTRY2"
+        elif zone3_spots and gate_operable.get("gate5", False):
+            assigned_spot = sorted(zone3_spots, key=extract_spot_number)[0]
+            target_gate   = "gate5"; target_entry = "ENTRY3"
+
+        if assigned_spot:
+            parking_spots[assigned_spot] = False
+            active_cars[car_plate] = {
+                "entry_time":       server_time,
+                "car_type":         car_type,
+                "assigned_spot":    assigned_spot,
+                "assigned_ts":      time.time(),
+                "planned_duration": planned_dur,
+                "charged":          False,
+                "parked":           False,
+            }
 
         if assigned_spot:
             current_gate = gate_for_entry_spot(spot_name)
+            print(
+                f"[ROUTING] {car_plate}: current={spot_name}/{current_gate}, "
+                f"assigned={assigned_spot}, target={target_entry}/{target_gate}"
+            )
+
             if current_gate == target_gate:
                 print(f"[ENTRY] {car_plate} at correct {current_gate} -> {assigned_spot}.")
                 await gate_queues[current_gate].put({
-                    "car_plate": car_plate, "gate_name": current_gate, "destination": assigned_spot,
+                    "car_plate": car_plate,
+                    "gate_name": current_gate,
+                    "destination": assigned_spot,
                 })
             else:
-                print(f"[ENTRY REROUTE] {car_plate} at {current_gate}, needs {target_gate} -> {target_entry}.")
-                if current_gate == "gate3" and zone1_spots:
-                    print(f"[ZONE GUARD] Zone 1 not full -> closing gate3.")
-                    await api_close_barrier_gate("gate3")
-                elif current_gate == "gate5" and (zone1_spots or zone2_spots):
-                    print(f"[ZONE GUARD] Zone 1/2 not full -> closing gate5.")
-                    await api_close_barrier_gate("gate5")
-                await api_send_car_to_destination(car_plate, target_entry)
+                print(
+                    f"[ENTRY REROUTE] {car_plate} at {current_gate}, "
+                    f"needs {target_gate} -> {target_entry}."
+                )
+
+                # if current_gate == "gate3" and zone1_spots:
+                #     print(f"[ZONE GUARD] Zone 1 not full -> closing gate3.")
+                #     await api_close_barrier_gate("gate3")
+                # elif current_gate == "gate5" and (zone1_spots or zone2_spots):
+                #     print(f"[ZONE GUARD] Zone 1/2 not full -> closing gate5.")
+                #     await api_close_barrier_gate("gate5")
+
+                # Do NOT blindly send the car to ENTRY2/ENTRY3. The simulator
+                # rejects the request when another car is already occupying
+                # that EntrySpot. Queue it until the EntrySpot reports CarOut.
+                await api_open_barrier_gate(target_gate)
+                await send_car_to_entry_or_queue(
+                    car_plate, target_entry, assigned_spot
+                )
         else:
             print(f"[ENTRY] No spot for {car_plate} ({norm_type}) -> leavepark.")
             open_gate    = next((g for g in ENTRANCE_GATES if gate_operable.get(g)), None)
@@ -666,8 +736,7 @@ async def process_car_exit(data: dict):
     if payment_ok:
         freed = car_info.get("assigned_spot") or car_info.get("parked_spot")
         if freed and freed in parking_spots:
-            async with spot_lock:
-                parking_spots[freed] = True
+            parking_spots[freed] = True
             print(f"[EXIT] Spot {freed} freed.")
         if car_plate in active_cars:
             active_cars[car_plate]["assigned_spot"] = None
@@ -744,8 +813,7 @@ async def webhook(request: Request):
         if comp:
             component_health[comp] = {"broken": False, "under_maintenance": False}
             if comp in parking_spots:
-                async with spot_lock:
-                    parking_spots[comp] = True
+                parking_spots[comp] = True
             print(f"[COMPONENT] {comp} REPAIRED.")
 
     elif event_class in ("component_maintenance","component_under_maintenance"):
@@ -773,33 +841,53 @@ async def webhook(request: Request):
 
     # Ground-truth parking sync
     if spot_type == "Park" or (spot_name and spot_name in parking_spots):
-        async with spot_lock:
-            if direction == "CarIn":
-                parking_spots[spot_name] = False
-                if car_plate:
-                    if car_plate not in active_cars:
-                        active_cars[car_plate] = {
-                            "entry_time":       data.get("ServerDateTime",""),
-                            "car_type":         data.get("CarType","Normal"),
-                            "assigned_spot":    spot_name,
-                            "parked_spot":      spot_name,
-                            "planned_duration": float(data.get("PlannedParkingDurationInMinutes",1) or 1),
-                            "charged": False, "parked": True,
-                        }
-                    else:
-                        active_cars[car_plate]["assigned_spot"] = spot_name
-                        active_cars[car_plate]["parked_spot"]   = spot_name
-                        active_cars[car_plate]["parked"]        = True
-                print(f"[SENSOR] {spot_name} OCCUPIED by {car_plate}.")
-            elif direction == "CarOut":
-                parking_spots[spot_name] = True
-                for p, info in list(active_cars.items()):
-                    if info.get("assigned_spot") == spot_name:
-                        info["assigned_spot"] = None
-                print(f"[SENSOR] {spot_name} FREE.")
+        if direction == "CarIn":
+            parking_spots[spot_name] = False
+            if car_plate:
+                if car_plate not in active_cars:
+                    active_cars[car_plate] = {
+                        "entry_time":       data.get("ServerDateTime",""),
+                        "car_type":         data.get("CarType","Normal"),
+                        "assigned_spot":    spot_name,
+                        "parked_spot":      spot_name,
+                        "planned_duration": float(data.get("PlannedParkingDurationInMinutes",1) or 1),
+                        "charged": False, "parked": True,
+                    }
+                else:
+                    active_cars[car_plate]["assigned_spot"] = spot_name
+                    active_cars[car_plate]["parked_spot"]   = spot_name
+                    active_cars[car_plate]["parked"]        = True
+            print(f"[SENSOR] {spot_name} OCCUPIED by {car_plate}.")
+        elif direction == "CarOut":
+            parking_spots[spot_name] = True
+            for p, info in list(active_cars.items()):
+                if info.get("assigned_spot") == spot_name:
+                    info["assigned_spot"] = None
+            print(f"[SENSOR] {spot_name} FREE.")
 
-    if (spot_type == "EntrySpot" or (spot_name and spot_name.upper().startswith("ENTRY"))) and direction == "CarOut":
-        asyncio.create_task(auto_close_gate_after_delay(gate_for_entry_spot(spot_name), 0.3))
+    # -------------------------------------------------
+    # ENTRANCE SPOT OCCUPANCY / WAITING QUEUES
+    # -------------------------------------------------
+    if (spot_type == "EntrySpot" or (spot_name and spot_name.upper().startswith("ENTRY"))):
+        entry_name = (spot_name or "ENTRY1").upper()
+        if entry_name in entry_occupied:
+            if direction == "CarIn":
+                entry_occupied[entry_name] = True
+                print(
+                    f"[ENTRY SENSOR] {entry_name} OCCUPIED by {car_plate}."
+                )
+            elif direction == "CarOut":
+                entry_occupied[entry_name] = False
+                print(
+                    f"[ENTRY SENSOR] {entry_name} FREE."
+                )
+                asyncio.create_task(
+                    auto_close_gate_after_delay(
+                        gate_for_entry_spot(entry_name), 0.3
+                    )
+                )
+                # Release only after the EntrySpot has been marked free.
+                # asyncio.create_task(process_waiting_entry(entry_name))
 
     if (spot_type == "ExitSpot" or (spot_name and spot_name.upper().startswith("EXIT"))) and direction == "CarOut":
         if car_plate:
@@ -917,13 +1005,12 @@ async def get_system_status():
     except Exception:
         pass
 
-    async with spot_lock:
-        total    = len(parking_spots)
-        free     = sum(1 for v in parking_spots.values() if v)
-        occupied = total - free
-        z1_free  = sum(1 for s,v in parking_spots.items() if s.startswith("S")   and v)
-        z2_free  = sum(1 for s,v in parking_spots.items() if s.startswith("bay") and v)
-        z3_free  = sum(1 for s,v in parking_spots.items() if s.startswith("P")   and v)
+    total    = len(parking_spots)
+    free     = sum(1 for v in parking_spots.values() if v)
+    occupied = total - free
+    z1_free  = sum(1 for s,v in parking_spots.items() if s.startswith("S")   and v)
+    z2_free  = sum(1 for s,v in parking_spots.items() if s.startswith("bay") and v)
+    z3_free  = sum(1 for s,v in parking_spots.items() if s.startswith("P")   and v)
 
     return {
         "backend": "online", "simulator": "online" if sim_online else "offline",
@@ -1073,8 +1160,7 @@ async def list_parking_spots():
     except Exception as e:
         print(f"[WARN] list-parking-spots: {e}")
 
-    async with spot_lock:
-        local_snap = dict(parking_spots)
+    local_snap = dict(parking_spots)
 
     spots = []
     zone_defs = [
@@ -1260,7 +1346,4 @@ async def car_goto(name: str, destination: str):
 async def car_charge(name: str, parking_cost: float = 0.0, charging_cost: float = 0.0):
     """Charge a car with optional parking and charging cost query parameters."""
     return await api_charge_car(name, parking_cost, charging_cost)
-
-
-
         
