@@ -23,10 +23,10 @@ together with your own section.
 | Area | Owner | Owns these files | Route prefix |
 | --- | --- | --- | --- |
 | Automation: failures, usage cycles, preventive maintenance, day/night lights, CO + fans, charge only after parking | **Zhi Hong (Tee)** | `backend/fastapi_project/main.py`, new `backend/fastapi_project/automation_*.py` | `/api/automation/...` |
-| Database / logs: event logging, login attempts, audit logs, penalties, DB for their APIs | **Jiaying** | `database/schema.sql`, `backend/app/models/*` (new files), `backend/app/services/{login_attempts,audit,penalties,event_log}.py`, `backend/app/api/routes/{login_attempts,audit,penalties,event_log}.py`, `docs/EVENT_TYPES.md` | `/api/auth/login-attempts`, `/api/audit/...`, `/api/penalties/...`, `/api/logs/...` |
+| Database / logs: event logging, login attempts, audit logs, penalties, DB for their APIs | **Jiaying** | `database/schema.sql`, `backend/app/models/*` (new files), `backend/app/services/{login_attempts,audit,penalties,event_log}.py`, `backend/app/services/user_admin.py`, `backend/app/api/routes/{login_attempts,audit,penalties,event_log,admin_users}.py`, `docs/EVENT_TYPES.md` | `/api/auth/login-attempts`, `/api/auth/me/permissions`, `/api/audit/...`, `/api/penalties/...`, `/api/logs/...`, `/api/admin/users`, `/api/admin/permissions` |
 | Admin / RBAC UI: users add/edit/remove, permissions (repair, finance, gate/light/fan control) | **Jackson** | new `web-interface/src/pages/admin/*`, new `web-interface/src/services/adminApi.js` | frontend only |
 | Operations / reports UI: 3-zone dashboard, component health, CO/fan/light, broken/maintenance, penalties, audit, daily + financial report, alerts | **Christen** | new `web-interface/src/pages/ops/*`, new `web-interface/src/components/ops/*`, new `web-interface/src/services/opsApi.js` | frontend only |
-| Integration: signed webhooks, backend RBAC (403), unknown/manual parked car, wiring modules together | **FastAPI owner = Zhi Hong (Tee)** | `backend/fastapi_project/db_hook.py`, `backend/app/api/routes/auth.py`, `backend/app/api/deps.py`, `backend/app/models/enums.py`, `backend/app/services/webhook_handlers.py` | `/api/admin/...` (user CRUD, permissions) |
+| Integration: signed webhooks, backend RBAC (403), unknown/manual parked car, wiring modules together | **FastAPI owner = Zhi Hong (Tee)** | `backend/fastapi_project/db_hook.py`, `backend/app/api/routes/auth.py`, `backend/app/api/deps.py`, `backend/app/models/enums.py`, `backend/app/services/webhook_handlers.py` | applies `CanRepair` / `CanControlGates` / ... (from `services/user_admin.py`) to routes |
 
 ## Shared files: the only allowed edits
 
@@ -44,9 +44,10 @@ together with your own section.
 
 ## Shared contracts (agree before coding)
 
-- **Roles / permissions:** the DB has `ADMIN` and `OPERATOR` today (`users.role`). New permissions (repair, finance
-  report, gate/light/fan control) are decided by the FastAPI owner in `enums.py` + `deps.py`; any new column or table
-  for them goes through Jiaying. Jackson's UI calls the FastAPI owner's `/api/admin/...` endpoints.
+- **Roles / permissions:** `users.role` is `ADMIN` or `OPERATOR`. Per-user authorities (`REPAIR`, `FINANCIAL_REPORT`,
+  `GATE_CONTROL`, `LIGHT_CONTROL`, `FAN_CONTROL`) are in `user_permissions` (Jiaying, `services/user_admin.py`); Admin
+  has all of them. Jackson's UI calls `/api/admin/users` + `/api/admin/permissions`; every page can call
+  `/api/auth/me/permissions` to hide buttons. Zhi Hong protects routes with `CanRepair`, `CanControlGates`, ...
 - **Event log:** operational events go into the existing `events` table via `app.services.parking.log_event(db, "TYPE", ...)`.
   Use UPPER_SNAKE event types with your area as prefix, e.g. `AUTOMATION_FAN_ON`, `MAINTENANCE_REPAIR_SENT`.
 - **Penalties:** the simulator's `penalty` webhooks are already stored in `events` (`event_type = 'PENALTY'`,

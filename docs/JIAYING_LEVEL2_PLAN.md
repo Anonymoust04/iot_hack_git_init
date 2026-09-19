@@ -41,6 +41,16 @@ and it's committed). This is the one place to see what's left before the PR.
 - [ ] Reviewed: `git status` shows only this task's files
 - [x] Committed (`97c976f`, with Task A follow-up)
 
+### Task D — User management + authorities (RBAC data)
+- [x] Files created: `models/user_permission.py`, `services/user_admin.py`, `routes/admin_users.py`, `tests/test_admin_users.py`
+- [x] `user_permissions` table appended to `database/schema.sql` (no change to `users`: no reset needed)
+- [x] `init_db.py`: `user_permissions` added to the drop list before `users` (needed by the foreign key)
+- [x] Tests pass on `carpark_test_users` (14 passed, real Aiven MySQL)
+- [x] Full suite passes on `carpark_test_full` (83 tests; also fixed a leftover-admin bug in `test_audit.py`)
+- [x] Committed (`44833b0`)
+- [ ] Wired in by Zhi Hong (router + permission checks on routes, see "Task D" below)
+- [ ] Admin page built by Jackson (API below)
+
 ### Step 4 — Handoff & PR
 - [ ] Full suite passes together: `pytest` in `backend/` (real MySQL run, not skipped) — latest isolated MySQL run: 52 passed, 6 failed, 14 errors; the test admin was not seeded after another Admin was created first
 - [ ] One handoff message sent to Zhi Hong: login route change, router registrations, audit call sites,
@@ -80,6 +90,51 @@ Then the whole suite, so nothing old broke: `pytest` → all `passed`.
    with 2 entries, newest first (`true`, then `false`).
 3. **Authorize**, then `GET /api/auth/login-attempts` → the same list.
 4. In MySQL: `SELECT * FROM login_attempts ORDER BY id DESC LIMIT 10;`: no password anywhere.
+
+**Reminder:** the manual login check is still pending until Zhi Hong applies the `auth.py` and `db_hook.py`
+handoff. Before that wiring, the login-attempt service and tests can pass, but the running `/api/auth/login`
+response will not yet contain `login_attempts`, and `/api/auth/login-attempts` will not be registered in the
+real app.
+
+### Manual penalty verification
+
+The penalty service and focused tests are already complete. To verify the endpoint manually after Zhi Hong
+registers the penalties router, use this order:
+
+1. Start MySQL and the backend. The backend must be running because the SQL insert only creates test data;
+  it does not call the API.
+2. In MySQL Workbench, DBeaver, or the MySQL client, select the configured `DB_NAME` database and insert one
+  test penalty. `DB_NAME` is the real development database; do not use the pytest database unless you are
+  deliberately testing there.
+
+  ```sql
+  INSERT INTO events
+  (event_type, event_time, raw_data)
+  VALUES
+  ('PENALTY', UTC_TIMESTAMP(),
+   '{"Reason":"Occupied broken spot","FineAmount":"50.00","Type":"ParkingSpot","ComponentName":"S12","CarPlateNumber":"CAR-001","EventId":"manual-penalty-1"}');
+  ```
+
+3. Open http://127.0.0.1:8000/docs, call `POST /api/auth/login`, and copy the returned `access_token`.
+4. Click **Authorize** in Swagger and enter `Bearer <access_token>`.
+5. Call `GET /api/penalties`. The response should contain the inserted row with reason `Occupied broken
+  spot`, fine `50.00`, type `ParkingSpot`, component `S12`, and plate `CAR-001`.
+6. Call `GET /api/penalties/summary`. It should include the row in `count`, `total_fine`, and the
+  `ParkingSpot` entry under `by_type`.
+7. Call `GET /api/logs/events?types=PENALTY`. The same event should appear. Call
+  `GET /api/logs/daily-summary` and confirm the current UTC day's `penalties` and `penalty_total` include it.
+8. Delete the manual row afterwards if this is a shared development database:
+
+  ```sql
+   DELETE FROM events
+   WHERE event_type = 'PENALTY'
+     AND JSON_UNQUOTE(JSON_EXTRACT(raw_data, '$.EventId')) = 'manual-penalty-1';
+  ```
+
+**What must be wired first:** the SQL insert and service tests do not need `main.py`, but the manual endpoint
+checks require the running FastAPI app to register `penalties.router` and `event_log.router` in `db_hook.py`.
+The login step also requires the login handoff described above. You do not need to wait for the frontend page
+to verify these backend endpoints in Swagger.
 
 ---
 
@@ -250,6 +305,54 @@ event types so Zhi Hong's automation uses the same names. **No new table, no web
 
 **Tests:** insert `Event` rows with chosen `event_time`s; filters and ordering; `WEBHOOK` rows hidden by default;
 the day boundary (23:59 vs 00:00) counts correctly; empty day → zeros, not an error.
+
+---
+
+### Task D: User management + authorities (done by me)
+
+**Goal (Level 2):** RBAC so only authorized users can repair and generate financial reports; an Admin can
+create, edit and remove users and their authorities, shown on Jackson's admin page.
+
+**Design:** `users.role` stays `ADMIN` / `OPERATOR` (no change to an existing table). Extra authorities per user
+live in the new `user_permissions` table. **ADMIN has every authority**; an OPERATOR has only what an Admin ticks:
+
+| Authority | Allows |
+| --- | --- |
+| `REPAIR` | repair gates, spots, fans |
+| `FINANCIAL_REPORT` | generate / view financial reports |
+| `GATE_CONTROL` | open / close gates |
+| `LIGHT_CONTROL` | switch lights |
+| `FAN_CONTROL` | switch exhaust fans |
+
+Safety: nobody can delete their own account; the last ADMIN can't be deleted or demoted (safe even when two
+admins act at the same moment). Every create / edit / delete is written to the audit log (never the password).
+
+**API for Jackson's admin page** (all need an **Admin** token except the last one):
+
+| Call | Body / result |
+| --- | --- |
+| `GET /api/admin/permissions` | `[{name, description}]`: the checkboxes |
+| `GET /api/admin/users` | `[{id, username, role, permissions, created_at}]`: `permissions` = effective (Admin: all) |
+| `POST /api/admin/users` | `{username, password (min 4), role: "ADMIN"/"OPERATOR", permissions: [...]}` → 201 + the user; 409 duplicate; 422 unknown authority |
+| `PATCH /api/admin/users/{id}` | any of `{role, permissions, password}`; only what's sent changes; `permissions` replaces the list; 409 last admin |
+| `DELETE /api/admin/users/{id}` | 204; 409 own account / last admin |
+| `GET /api/auth/me/permissions` | any logged-in user → `{username, role, permissions}`: **hide buttons the user may not use** |
+
+Errors come back as `{"detail": "..."}`: show that text to the admin.
+
+**Handoff to Zhi Hong** (`db_hook.py`, top: `from app.api.routes import admin_users  # noqa: E402`; in `setup()`
+after the loop): `app.include_router(admin_users.router)`. Then protect routes with the ready-made checks from
+`app.services.user_admin` (401 without login, 403 without the authority, Admin always passes):
+
+| Route | Change the user parameter to |
+| --- | --- |
+| `routes/control.py` `gate_action` (open/close) | `user: CanControlGates` (and `CanRepair` when `action == "repair"`, or split repair into its own route) |
+| `routes/control.py` `repair_spot` | `user: CanRepair` |
+| financial report routes (Christen's data, when built) | `user: CanViewFinance` |
+| `main.py` `/barrier-gates/...`, `/lights/...`, `/exhaust-fans/...`, `/parking-spots/{name}/repair` | add `user: CanControlGates` / `CanControlLights` / `CanControlFans` / `CanRepair` |
+
+How to test by hand: `pytest tests/test_admin_users.py -v` (14 passed), or wire the router locally (don't commit
+`db_hook.py`) and use `/docs`: create an Operator with `REPAIR`, log in as them, `GET /api/auth/me/permissions`.
 
 ---
 
