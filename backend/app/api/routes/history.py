@@ -1,4 +1,4 @@
-"""Searchable history of arrivals / parking / departures / charges."""
+"""Searchable history of parking sessions and events."""
 
 from datetime import datetime
 
@@ -6,8 +6,8 @@ from fastapi import APIRouter, Query
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession
-from app.models import ParkingSession
-from app.schemas import ParkingSessionOut
+from app.models import Event, ParkingSession, ParkingSpot
+from app.schemas import EventOut, ParkingSessionOut
 
 router = APIRouter(prefix="/api/history", tags=["history"])
 
@@ -18,22 +18,39 @@ def search_sessions(
     _: CurrentUser,
     plate: str | None = None,
     status: str | None = None,
-    spot: str | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
     limit: int = Query(50, le=500),
     offset: int = 0,
 ):
-    q = select(ParkingSession)
+    q = (select(ParkingSession, ParkingSpot.name)
+         .outerjoin(ParkingSpot, ParkingSession.parking_spot_id == ParkingSpot.id))
     if plate:
-        q = q.where(ParkingSession.plate.ilike(f"%{plate}%"))
+        q = q.where(ParkingSession.car_plate.like(f"{plate}%"))  # prefix match can use the index
     if status:
         q = q.where(ParkingSession.status == status)
-    if spot:
-        q = q.where(ParkingSession.spot_name == spot)
     if since:
-        q = q.where(ParkingSession.arrived_at >= since)
+        q = q.where(ParkingSession.entry_time >= since)
     if until:
-        q = q.where(ParkingSession.arrived_at <= until)
-    q = q.order_by(ParkingSession.arrived_at.desc()).limit(limit).offset(offset)
-    return db.scalars(q).all()
+        q = q.where(ParkingSession.entry_time <= until)
+    q = q.order_by(ParkingSession.id.desc()).limit(limit).offset(offset)
+    return [
+        ParkingSessionOut.model_validate(s).model_copy(update={"spot_name": spot_name})
+        for s, spot_name in db.execute(q).all()
+    ]
+
+
+@router.get("/events", response_model=list[EventOut])
+def search_events(
+    db: DbSession,
+    _: CurrentUser,
+    plate: str | None = None,
+    event_type: str | None = None,
+    limit: int = Query(20, le=500),
+):
+    q = select(Event)
+    if plate:
+        q = q.where(Event.car_plate == plate)
+    if event_type:
+        q = q.where(Event.event_type == event_type)
+    return db.scalars(q.order_by(Event.id.desc()).limit(limit)).all()

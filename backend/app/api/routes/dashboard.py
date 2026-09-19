@@ -1,12 +1,10 @@
-"""Read-only park status for the dashboard (served from our DB, not the simulator)."""
-
-from collections import defaultdict
+"""Read-only park status for the dashboard (served from MySQL, never from the simulator)."""
 
 from fastapi import APIRouter
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, DbSession
-from app.models import Gate, ParkingSpot
+from app.models import Gate, ParkingSpot, SpotPurpose, SpotStatus
 from app.schemas import DashboardOut, GateOut, SpotOut, ZoneSummary
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
@@ -14,24 +12,30 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 @router.get("", response_model=DashboardOut)
 def summary(db: DbSession, _: CurrentUser):
-    spots = db.scalars(select(ParkingSpot).where(ParkingSpot.purpose == "Park")).all()
-    by_zone: dict[str, ZoneSummary] = defaultdict(lambda: ZoneSummary(zone="", total=0, occupied=0, free=0, unavailable=0))
-    for s in spots:
-        z = by_zone[s.zone]
-        z.zone = s.zone
-        z.total += 1
-        if s.broken or s.under_maintenance:
-            z.unavailable += 1
-        elif s.occupied_by or s.reserved_for:
-            z.occupied += 1
+    # One GROUP BY query: count of each status per zone (see database/queries.sql)
+    rows = db.execute(
+        select(ParkingSpot.zone, ParkingSpot.status, func.count())
+        .where(ParkingSpot.purpose == SpotPurpose.PARK)
+        .group_by(ParkingSpot.zone, ParkingSpot.status)
+    ).all()
+    zones: dict[str, ZoneSummary] = {}
+    for zone, status, n in rows:
+        z = zones.setdefault(zone, ZoneSummary(zone=zone, total=0, free=0, reserved=0, occupied=0, unavailable=0))
+        z.total += n
+        if status == SpotStatus.FREE:
+            z.free += n
+        elif status == SpotStatus.RESERVED:
+            z.reserved += n
+        elif status == SpotStatus.OCCUPIED:
+            z.occupied += n
         else:
-            z.free += 1
+            z.unavailable += n
 
-    zones = sorted(by_zone.values(), key=lambda z: z.zone)
-    total_free = sum(z.free for z in zones)
+    zone_list = sorted(zones.values(), key=lambda z: z.zone)
+    total_free = sum(z.free for z in zone_list)
     gates = db.scalars(select(Gate).order_by(Gate.name)).all()
     return DashboardOut(
-        zones=zones,
+        zones=zone_list,
         gates=[GateOut.model_validate(g) for g in gates],
         total_free=total_free,
         park_full=total_free == 0,
