@@ -15,7 +15,7 @@ function Navigation() {
   }
 
   const { data: status } = usePolling(getBackendStatus);
-  const isOnline = status?.backend === "online" && status?.simulator === "online";
+  const isOnline = status ? status.backend === "online" : true;
 
   return (
     <nav className="navigation">

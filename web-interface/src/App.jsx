@@ -60,35 +60,9 @@ function App() {
           }
         />
 
-        {/* Penalties */}
-        <Route
-          path="/penalties"
-          element={
-            <Layout>
-              <Penalties />
-            </Layout>
-          }
-        />
-
-        {/* Audit */}
-        <Route
-          path="/audit"
-          element={
-            <Layout>
-              <Audit />
-            </Layout>
-          }
-        />
-
-        {/* Reports */}
-        <Route
-          path="/reports"
-          element={
-            <Layout>
-              <Reports />
-            </Layout>
-          }
-        />
+        <Route path="/penalties" element={<Layout><Penalties /></Layout>} />
+        <Route path="/audit" element={<Layout><Audit /></Layout>} />
+        <Route path="/reports" element={<Layout><Reports /></Layout>} />
 
         {/* Account */}
         <Route
