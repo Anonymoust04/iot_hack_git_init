@@ -132,3 +132,20 @@ CREATE TABLE IF NOT EXISTS events (
     KEY ix_events_plate (car_plate),
     KEY ix_events_type (event_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- ---------------------------------------------------------------------
+-- login_attempts: every dashboard login, successful or failed (Level 2).
+-- Never stores passwords, hashes or tokens. username is what was typed, so
+-- failed attempts may name users that don't exist (kept on purpose).
+-- Written by app/services/login_attempts.py.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    username      VARCHAR(64)  NOT NULL,
+    success       BOOLEAN      NOT NULL,
+    ip_address    VARCHAR(45)  NULL,              -- IPv4 or IPv6
+    attempted_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY ix_login_attempts_user_time (username, attempted_at),  -- "last 3 attempts of this user"
+    KEY ix_login_attempts_time (attempted_at)                  -- recent / failed attempts overall
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
