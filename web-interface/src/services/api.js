@@ -493,9 +493,7 @@ export async function getDailyReport(date) {
 }
 
 export async function getFinancialReport(date) {
-  // TODO: Connect to a backend financial reporting endpoint when available.
-  void date;
-  return null;
+  return await request(`/api/logs/financial-summary?day=${encodeURIComponent(date)}`);
 }
 
 export async function chargeCar(plateNumber, parkingCost = 0.0, chargingCost = 0.0) {

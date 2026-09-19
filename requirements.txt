@@ -1,4 +1,6 @@
-# Python backend (Python 3.12+)
+# Python backend and tests (Python 3.12+).
+# This is the single package list; backend/requirements.txt includes it.
+# Frontend packages are installed separately from web-interface/package.json with npm.
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.13.5

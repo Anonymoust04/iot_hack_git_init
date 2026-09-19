@@ -4,11 +4,14 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict
 
 from app.api.deps import CurrentUser, DbSession
-from app.services.event_log import daily_summary, search_events
+from app.api.deps import require_permission
+from app.core.permissions import Permission
+from app.models import User
+from app.services.event_log import daily_summary, financial_summary, search_events
 
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
@@ -42,6 +45,24 @@ class DailySummaryOut(BaseModel):
     events_by_type: dict[str, int]
 
 
+class FinancialSummaryOut(BaseModel):
+    date: date
+    parking_revenue: Decimal
+    ev_charging_revenue: Decimal
+    penalty_cost: Decimal
+    total_revenue: Decimal
+    parking_transactions: int
+    charging_transactions: int
+    penalty_transactions: int
+    breakdown: list[dict]
+
+
+FinancialReportUser = Annotated[
+    User,
+    Depends(require_permission(Permission.FINANCIAL_REPORTS)),
+]
+
+
 @router.get("/events", response_model=list[EventOut])
 def events(
     db: DbSession,
@@ -63,3 +84,13 @@ def events(
 @router.get("/daily-summary", response_model=DailySummaryOut)
 def summary(db: DbSession, _: CurrentUser, day: date | None = None):
     return daily_summary(db, day or datetime.now(timezone.utc).date())
+
+
+@router.get("/financial-summary", response_model=FinancialSummaryOut)
+def financial(
+    db: DbSession,
+    _: FinancialReportUser,
+    day: date | None = None,
+):
+    """Financial data is database-backed and restricted to financial-report permission."""
+    return financial_summary(db, day or datetime.now(timezone.utc).date())

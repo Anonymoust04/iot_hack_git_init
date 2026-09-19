@@ -16,9 +16,11 @@ function Operations() {
   const [systemOnline, setSystemOnline] = useState(isLastKnownOnline);
   const [spots, setSpots] = useState(() => lastSpots ?? []);
   const [lastUpdated, setLastUpdated] = useState(() => lastUpdatedAt);
+  const [status, setStatus] = useState(null);
 
   const refresh = async () => {
     const [status, spotList] = await Promise.all([getSystemStatus(), getParkingSpots()]);
+    setStatus(status);
     const online = status.backend === "online" && status.simulator === "online";
     setSystemOnline(online);
     setSpots(online ? spotList : lastSpots ?? []);
@@ -46,7 +48,7 @@ function Operations() {
         </div>
         <div className="system-status"><span className="status-dot" style={{ backgroundColor: systemOnline ? "#22c55e" : "#94a3b8" }} />{systemOnline ? "System Online" : "System Offline"}</div>
       </header>
-      <div className="operations-panel" hidden={activeSection !== "#parking-spaces"}><ParkingGrid initialSpots={spots} onRefresh={refresh} /></div>
+      <div className="operations-panel" hidden={activeSection !== "#parking-spaces"}><ParkingGrid initialSpots={spots} availability={status} onRefresh={refresh} /></div>
       <div className="operations-panel" hidden={activeSection !== "#gate-control"}><GateControl systemOnline={systemOnline} /></div>
       <div className="operations-panel" hidden={activeSection !== "#facility-controls"}><ParkComponentsControl systemOnline={systemOnline} /></div>
     </div>

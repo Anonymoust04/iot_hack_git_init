@@ -6,7 +6,9 @@ from decimal import Decimal
 from sqlalchemy import Numeric, case, cast, func, select
 from sqlalchemy.orm import Session
 
+from app.models import ParkingSession, PaymentStatus
 from app.models.event import Event
+from app.services.penalties import penalty_summary
 
 
 ZERO = Decimal("0")
@@ -87,4 +89,41 @@ def daily_summary(db: Session, day: date) -> dict:
         "co_alerts": counts.get("CO_ALERT", 0),
         "busiest_hour": busiest_hour,
         "events_by_type": dict(sorted(counts.items())),
+    }
+
+
+def financial_summary(db: Session, day: date) -> dict:
+    """Summarize paid database transactions and penalties for one UTC day."""
+    start = datetime.combine(day, time.min)
+    end = start + timedelta(days=1)
+    parking_revenue, charging_revenue, parking_transactions, charging_transactions = db.execute(
+        select(
+            func.coalesce(func.sum(ParkingSession.parking_cost), ZERO),
+            func.coalesce(func.sum(ParkingSession.charging_cost), ZERO),
+            func.count(ParkingSession.id),
+            func.sum(case((ParkingSession.charging_cost > ZERO, 1), else_=0)),
+        ).where(
+            ParkingSession.payment_status == PaymentStatus.PAID,
+            ParkingSession.exit_time >= start,
+            ParkingSession.exit_time < end,
+        )
+    ).one()
+    penalties = penalty_summary(db, since=start, until=end - timedelta(microseconds=1))
+    parking_revenue = parking_revenue or ZERO
+    charging_revenue = charging_revenue or ZERO
+    penalty_total = penalties["total_fine"] or ZERO
+    return {
+        "date": day,
+        "parking_revenue": parking_revenue,
+        "ev_charging_revenue": charging_revenue,
+        "penalty_cost": penalty_total,
+        "total_revenue": parking_revenue + charging_revenue,
+        "parking_transactions": parking_transactions,
+        "charging_transactions": charging_transactions or 0,
+        "penalty_transactions": penalties["count"],
+        "breakdown": [
+            {"category": "Parking", "transactions": parking_transactions, "amount": parking_revenue},
+            {"category": "EV charging", "transactions": charging_transactions or 0, "amount": charging_revenue},
+            {"category": "Penalties", "transactions": penalties["count"], "amount": penalty_total},
+        ],
     }

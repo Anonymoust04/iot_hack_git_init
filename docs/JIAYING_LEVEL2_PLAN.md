@@ -21,11 +21,13 @@ observed or exercised; it does not mean every failure-mode requirement is comple
 - [x] Simulator returns parking spots, barriers, lights, exhaust fans, zones, and alarms.
 - [x] Simulator reports three zones and live CO readings; it currently reports maintenance alarms for `gate3` and `gate5`.
 - [x] `npm run build` succeeds for the frontend.
+- [x] Operations parking view now shows live availability totals in the browser, including total, free, occupied,
+  and unavailable spaces while detailed spot data loads.
 
 ### Partially working or currently failing live
 
-- [ ] Dashboard live integration is not verified: the browser currently displays `System Offline`, unavailable
-  component data, and unavailable CO data despite the backend health endpoint and simulator being reachable.
+- [ ] Main Dashboard live integration still needs verification in the current browser session; Operations now loads
+  live parking availability, but the Dashboard has additional component/CO requests and may still show unavailable data.
 - [ ] Admin user directory is not verified: the page remains on `REFRESHING...` / loading instead of showing users.
 - [ ] The simulator returns a high numeric CO reading for Zone 1 while its risk label is `Safe`; threshold/risk
   consistency needs checking.
@@ -39,14 +41,16 @@ observed or exercised; it does not mean every failure-mode requirement is comple
 - [ ] Strict signed-only webhook enforcement: `webhook_require_signature` still defaults to `False`, so missing
   signatures are accepted by default.
 - [ ] Audit call-site integration for gate/control/repair actions, user changes, fan/light actions, and automation.
-- [ ] Financial report backend and frontend integration: `getFinancialReport()` still returns `null`.
+- [x] Financial report backend and frontend integration: `/api/logs/financial-summary` reads paid parking sessions
+  and penalty events from the database; the Reports page requests it for the selected date. Covered by
+  `backend/tests/test_financial_report.py`.
 - [ ] Usage-cycle monitoring for parking spots, durable cycle history, and threshold-based maintenance scheduling.
 - [ ] Complete failure recovery for every component type, including durable maintenance state and repair outcomes.
 - [ ] Complete RBAC protection for simulator routes in `main.py`, especially direct movement, charging, and component routes.
 - [ ] Frontend permission-based hiding/enforcement using effective per-user permissions rather than only local role checks.
 - [ ] Complete manual-parking recovery: identify/register a car that entered without gate/spot events, estimate its
   duration, charge it once, free the occupied spot, record the events, and route it safely through an exit.
-- [ ] Complete dynamic financial and operational reporting validation with live database data.
+- [ ] Complete live validation of dynamic financial and operational reporting with populated production-like data.
 
 ### Recommended next checks
 

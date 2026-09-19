@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { repairParkingSpot } from '../services/api';
 
-function ParkingGrid({ initialSpots = [], onRefresh }) {
+function ParkingGrid({ initialSpots = [], availability = null, onRefresh }) {
   const navigate = useNavigate();
   const [selectedSpot, setSelectedSpot] = useState(null);
   const [repairing, setRepairing] = useState(false);
@@ -29,7 +29,12 @@ function ParkingGrid({ initialSpots = [], onRefresh }) {
     }
   };
 
-  const freeCount = spots.filter((s) => s.status === 'free').length;
+  const freeCount = spots.length ? spots.filter((s) => s.status === 'free').length : availability?.available_spots || 0;
+  const occupiedCount = spots.length ? spots.filter((s) => s.status === 'occupied').length : availability?.occupied_spots || 0;
+  const unavailableCount = spots.length
+    ? spots.filter((s) => !['free', 'occupied'].includes(s.status)).length
+    : Math.max(0, (availability?.total_spots || 0) - freeCount - occupiedCount);
+  const totalCount = spots.length || availability?.total_spots || 0;
 
   return (
     <section className="parking-section">
@@ -37,8 +42,15 @@ function ParkingGrid({ initialSpots = [], onRefresh }) {
         <div>
           <h2>Parking Spaces</h2>
           <p>
-            {spots.length ? `Live availability (${freeCount} / ${spots.length} Free)` : 'Parking space data unavailable'}
+            {totalCount ? `Live availability (${freeCount} / ${totalCount} Free)` : 'Parking space data unavailable'}
           </p>
+        </div>
+
+        <div className="parking-availability-summary" aria-label="Parking availability">
+          <span><strong>{totalCount}</strong> Total</span>
+          <span className="availability-free"><strong>{freeCount}</strong> Free</span>
+          <span className="availability-occupied"><strong>{occupiedCount}</strong> Occupied</span>
+          <span className="availability-unavailable"><strong>{unavailableCount}</strong> Unavailable</span>
         </div>
 
         {spots.length > 0 && <div style={{ display: 'flex', alignItems: 'center' }}>
