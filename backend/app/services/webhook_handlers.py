@@ -1,24 +1,30 @@
-"""Simulator webhook -> database + simulator commands.
+"""Simulator webhook -> database. Used by fastapi_project/db_hook.py (called from POST /webhook).
 
 Every webhook has: EventClass, EventId (unique, dedup), SequenceId (+1 per call, gap/order
 detection), Signature (MD5, integrity), ServerDateTime (the simulator's clock).
-The route (api/routes/webhook.py) verifies, dedups and stores the raw payload, then calls
-EVENT_HANDLERS[EventClass](db, sim, payload).
 
-Each handler: DB function first (short transaction, commits), THEN simulator call.
+    receive()  check signature, dedup on EventId, check SequenceId, store the raw payload
+    process()  update the tables (car parked / left, gates, penalties...). Sending cars and
+               opening gates is done by main.py's own queues, not here.
+
+Functions here are sync and take a Session; db_hook.py runs them in a worker thread.
 """
 
 import hashlib
 import hmac
+import json
 import logging
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import CarType, GateState
+from app.config import get_settings
+from app.models import CarType, Event, GateState
 from app.services import components, parking
-from app.services.simulator_client import SimulatorClient
+from app.services.parking import log_event
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +34,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _sig_text(value) -> str:
-    # Numbers arrive as their original JSON text (see the route), so 63.564693 stays "63.564693".
+    # Numbers arrive as their original JSON text (see receive()), so 63.564693 stays "63.564693".
     # TODO(confirm): how the server writes booleans and nulls; none appear in the documented payloads.
     if value is None:
         return ""
@@ -48,11 +54,6 @@ def signature_is_valid(fields: dict) -> bool:
     return hmac.compare_digest(compute_signature(fields), received.lower())
 
 
-def parse_event(payload: dict) -> tuple[str | None, str | None]:
-    """Return (EventClass, car plate) from a raw webhook payload."""
-    return payload.get("EventClass"), payload.get("CarPlateNumber")
-
-
 def server_time(payload: dict) -> datetime | None:
     try:
         return datetime.strptime(payload["ServerDateTime"], "%Y-%m-%d %H:%M:%S")
@@ -62,117 +63,139 @@ def server_time(payload: dict) -> datetime | None:
 
 def car_type(payload: dict) -> CarType | None:
     """Webhook CarType -> our spot type. The simulator calls ordinary cars "Normal"."""
-    raw = payload.get("CarType")
+    raw = str(payload.get("CarType") or "")
     if raw == "Normal":
         return CarType.ANY
+    if raw.upper() == "EV" or "ELECTRIC" in raw.upper():
+        return CarType.ELECTRIC
     try:
         return CarType(raw)
     except ValueError:
         return None
 
 
+def _is_spot(payload: dict, spot_type: str, prefix: str) -> bool:
+    # same test as Tee's original router: SpotType, or the spot name (ENTRY1 / EXIT)
+    name = str(payload.get("SpotName") or "").upper()
+    return payload.get("SpotType") == spot_type or name.startswith(prefix)
+
+
 # ---------------------------------------------------------------------------
-# Car lifecycle (EventClass car_spot_action)
+# Step 1: receive (verify, dedup, order, store raw)
 # ---------------------------------------------------------------------------
 
-def on_car_arrived(db: Session, sim: SimulatorClient, plate: str, car_type: CarType | None, payload: dict) -> None:
-    spot = parking.allocate_spot(db, plate, car_type, raw_data=payload, at=server_time(payload))
-    if spot is None:
-        sim.car_goto(plate, "leavepark")  # full: send away at once so the entrance isn't blocked
-        return
+def _as_int(value) -> int | None:
     try:
-        # TODO(confirm): which gate belongs to the entry spot the car is waiting at
-        # sim.open_gate("<entry gate>")
-        sim.car_goto(plate, spot)
-    except Exception:
-        parking.cancel_reservation(db, plate, spot)  # don't leak the spot
-        raise
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
-def on_car_parked(db: Session, sim: SimulatorClient, plate: str, spot_name: str, payload: dict) -> None:
-    parking.mark_parked(db, plate, spot_name, raw_data=payload, at=server_time(payload))
+def receive(db: Session, body: bytes) -> tuple[dict, str | None]:
+    """Returns (payload, None) if the webhook should be processed,
+    or (payload, reason) if not: "bad signature" or "duplicate".
+    The raw payload is committed BEFORE processing, so nothing is lost if a handler fails."""
+    try:
+        payload = json.loads(body)
+        # same JSON, numbers kept as their original text: the signature is computed over that text
+        sig_fields = json.loads(body, parse_float=str, parse_int=str)
+    except ValueError:
+        payload = sig_fields = {"raw": body.decode(errors="replace")}
+    if not isinstance(payload, dict):
+        payload = sig_fields = {"raw": payload}
+    plate = payload.get("CarPlateNumber")
+
+    # integrity: fake payments fail this
+    if get_settings().webhook_verify_signature and not signature_is_valid(sig_fields):
+        log.warning("Bad webhook signature: %s", payload)
+        # no event_id here: a forged copy must not block the real event with the same EventId
+        log_event(db, "WEBHOOK_BAD_SIGNATURE", car_plate=plate, raw_data=payload)
+        db.commit()
+        return payload, "bad signature"
+
+    event_id = payload.get("EventId")
+    sequence_id = _as_int(payload.get("SequenceId"))
+    last_seq = db.scalar(select(func.max(Event.sequence_id))) if sequence_id is not None else None
+
+    # dedup: event_id is UNIQUE, so a repeat fails to insert even if both copies arrive at once
+    log_event(db, "WEBHOOK", car_plate=plate, raw_data=payload,
+              event_id=str(event_id) if event_id else None, sequence_id=sequence_id)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        log.info("Duplicate webhook %s ignored", event_id)
+        return payload, "duplicate"
+
+    # order: log gaps / older numbers, still process (missed events can't be fetched again)
+    if last_seq is not None and sequence_id != last_seq + 1:
+        kind = "SEQUENCE_GAP" if sequence_id > last_seq else "SEQUENCE_OUT_OF_ORDER"
+        log.warning("%s: last %s, got %s", kind, last_seq, sequence_id)
+        log_event(db, kind, car_plate=plate, raw_data={"last": last_seq, "got": sequence_id, "event_id": event_id})
+        db.commit()
+    return payload, None
 
 
-def on_car_left_spot(db: Session, sim: SimulatorClient, plate: str, payload: dict) -> None:
-    parking.mark_leaving_spot(db, plate, raw_data=payload)
+# ---------------------------------------------------------------------------
+# Step 2: database handlers (car at ENTRY / EXIT is handled by main.py's queues)
+# ---------------------------------------------------------------------------
 
-
-def on_car_at_exit(db: Session, sim: SimulatorClient, plate: str, is_electric: bool, payload: dict) -> None:
-    charge = parking.record_charge(db, plate, is_electric, at=server_time(payload))
-    if charge is not None:  # None = already charged -> never charge twice (penalty)
-        sim.charge_car(plate, charge.parking_cost, charge.charging_cost)
-    # The exit gate should open only after a VALID payment_made (see on_payment_made).
-
-
-def on_car_departed(db: Session, sim: SimulatorClient, plate: str, payload: dict) -> None:
-    parking.complete_departure(db, plate, raw_data=payload)
-
-
-def handle_car_spot_action(db: Session, sim: SimulatorClient, payload: dict) -> None:
+def on_car_spot_action(db: Session, payload: dict) -> None:
     plate = payload["CarPlateNumber"]
     spot_type, direction = payload.get("SpotType"), payload.get("Direction")
-    if spot_type == "EntrySpot" and direction == "CarIn":
-        on_car_arrived(db, sim, plate, car_type(payload), payload)
-    elif spot_type == "Park" and direction == "CarIn":
-        on_car_parked(db, sim, plate, payload["SpotName"], payload)
+    if spot_type == "Park" and direction == "CarIn":
+        parking.mark_parked(db, plate, payload["SpotName"], raw_data=payload, at=server_time(payload))
     elif spot_type == "Park" and direction == "CarOut":
-        on_car_left_spot(db, sim, plate, payload)
-    elif spot_type == "ExitSpot" and direction == "CarIn":
-        on_car_at_exit(db, sim, plate, car_type(payload) == CarType.ELECTRIC, payload)
-    elif spot_type == "ExitSpot" and direction == "CarOut":
-        on_car_departed(db, sim, plate, payload)
+        parking.mark_leaving_spot(db, plate, raw_data=payload)  # frees the spot for the next car now
+    elif _is_spot(payload, "ExitSpot", "EXIT") and direction == "CarOut":
+        parking.complete_departure(db, plate, raw_data=payload)
     # EntrySpot/CarOut (car drove into the park) needs no action: the raw WEBHOOK row records it.
 
 
-# ---------------------------------------------------------------------------
-# Payments, gates, components, alerts
-# ---------------------------------------------------------------------------
-
-def on_payment_made(db: Session, sim: SimulatorClient, payload: dict) -> None:
+def on_payment_made(db: Session, payload: dict) -> bool:
+    """Returns True if the payment is valid (matches what we charged, first payment)."""
     plate = payload["CarPlateNumber"]
     try:
         amount = Decimal(str(payload["Amount"]))
     except (KeyError, InvalidOperation):
-        parking.log_event(db, "PAYMENT_REJECTED", car_plate=plate,
-                          raw_data={"reason": "missing or invalid Amount", "payload": payload})
+        log_event(db, "PAYMENT_REJECTED", car_plate=plate,
+                  raw_data={"reason": "missing or invalid Amount", "payload": payload})
         db.commit()
-        return
+        return False
     rejected = parking.record_payment(db, plate, amount, raw_data=payload)
     if rejected:
         log.warning("Payment from %s rejected: %s", plate, rejected)
-        return
-    # TODO(confirm): which gate belongs to the exit spot; open it here to let the paid car leave.
-    # sim.open_gate("<exit gate>")
+    return rejected is None
 
 
-def on_gate_action(db: Session, sim: SimulatorClient, payload: dict) -> None:
+def on_gate_action(db: Session, payload: dict) -> None:
     components.set_gate_state(db, payload["Name"], GateState(payload["Action"]))
 
 
-def on_component_broken(db: Session, sim: SimulatorClient, payload: dict) -> None:
+def on_component_broken(db: Session, payload: dict) -> None:
     components.set_broken(db, payload.get("Type", ""), payload["Name"], True, raw_data=payload)
 
 
-def on_component_fixed(db: Session, sim: SimulatorClient, payload: dict) -> None:
+def on_component_fixed(db: Session, payload: dict) -> None:
     components.set_broken(db, payload.get("Type", ""), payload["Name"], False, raw_data=payload)
 
 
-def on_penalty(db: Session, sim: SimulatorClient, payload: dict) -> None:
+def on_penalty(db: Session, payload: dict) -> None:
     name = payload.get("ComponentName")
-    parking.log_event(db, "PENALTY", car_plate=payload.get("CarPlateNumber"),
-                      gate_name=name if payload.get("Type") == "BarrierGate" else None, raw_data=payload)
+    log_event(db, "PENALTY", car_plate=payload.get("CarPlateNumber"),
+              gate_name=name if payload.get("Type") == "BarrierGate" else None, raw_data=payload)
     db.commit()
     log.warning("PENALTY %s: %s", payload.get("FineAmount"), payload.get("Reason"))
 
 
-def on_carbon_monoxide(db: Session, sim: SimulatorClient, payload: dict) -> None:
+def on_carbon_monoxide(db: Session, payload: dict) -> None:
     # Only sent for Mid / High / Critical. Level 2+: turn on that zone's exhaust fans here.
-    parking.log_event(db, "CO_ALERT", raw_data=payload)
+    log_event(db, "CO_ALERT", raw_data=payload)
     db.commit()
 
 
 EVENT_HANDLERS: dict = {
-    "car_spot_action": handle_car_spot_action,
+    "car_spot_action": on_car_spot_action,
     "payment_made": on_payment_made,
     "gate_action": on_gate_action,
     "component_broken": on_component_broken,
@@ -181,3 +204,20 @@ EVENT_HANDLERS: dict = {
     "carbon_monoxide_event": on_carbon_monoxide,
     # "test_webhook": nothing to do, the raw WEBHOOK row is enough
 }
+
+
+def process(db: Session, payload: dict):
+    """Run the database handler for this EventClass. Never raises: a failure is logged as
+    HANDLER_ERROR so the simulator keeps getting 200s. Returns the handler's result."""
+    handler = EVENT_HANDLERS.get(payload.get("EventClass"))
+    if handler is None:
+        return None
+    try:
+        return handler(db, payload)
+    except Exception as exc:
+        log.exception("Handler failed for %s", payload.get("EventClass"))
+        db.rollback()
+        log_event(db, "HANDLER_ERROR", car_plate=payload.get("CarPlateNumber"),
+                  raw_data={"error": str(exc)[:500], "payload": payload})
+        db.commit()
+        return None

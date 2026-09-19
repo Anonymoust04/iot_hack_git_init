@@ -45,6 +45,16 @@ def test_sync_upsert_keeps_ids_and_maps_status(db):
     assert len(db.scalars(select(ParkingSpot)).all()) == 4
 
 
+def test_sync_reads_car_counts_and_skips_leave_parking_spots(db):
+    # the real simulator sends detectedCars as a count, and has LeaveParking spots (ESCAPE1...)
+    upsert_parking_spots(db, [spot("S1", cars=0), spot("S2", cars=1), spot("ENTRY1", purpose="EntrySpot", cars=38),
+                              spot("ESCAPE1", purpose="LeaveParking")])
+    db.commit()
+    assert get_spot(db, "S1").status == SpotStatus.FREE
+    assert (get_spot(db, "S2").status, get_spot(db, "S2").current_car) == (SpotStatus.OCCUPIED, None)
+    assert db.scalar(select(ParkingSpot.id).where(ParkingSpot.name == "ESCAPE1")) is None
+
+
 def test_resync_keeps_reservation(db):
     upsert_parking_spots(db, [spot("S1")])
     db.commit()

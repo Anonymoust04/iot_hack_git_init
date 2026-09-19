@@ -15,7 +15,8 @@ class Settings(BaseSettings):
     app_port: int = 8000
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
 
-    sim_base_url: str = "http://localhost:5000/api/v1"
+    # Simulator settings.json "ListenAddress" + /api/v1
+    sim_base_url: str = "http://127.0.0.1:9898/api/v1"
     sim_email: str = "admin"
     sim_password: str = "admin"
     sim_timeout_seconds: float = 10
