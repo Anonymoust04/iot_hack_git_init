@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { getDailyReport, getFinancialReport } from "../services/api";
 import "../styles/Reports.css";
 
@@ -49,7 +50,8 @@ function statusTone(status) {
 }
 
 function Reports() {
-  const [tab, setTab] = useState("daily");
+  const location = useLocation();
+  const tab = location.hash === "#financial" ? "financial" : "daily";
   const [date, setDate] = useState(localToday);
   const [dailyReport, setDailyReport] = useState(null);
   const [financialReport, setFinancialReport] = useState(null);
@@ -80,10 +82,6 @@ function Reports() {
       </header>
 
       <div className="reports-toolbar">
-        <div className="reports-tabs" aria-label="Report type">
-          <button type="button" className={tab === "daily" ? "active" : ""} aria-pressed={tab === "daily"} onClick={() => { setDailyReport(null); setTab("daily"); }}>Daily Operations</button>
-          <button type="button" className={tab === "financial" ? "active" : ""} aria-pressed={tab === "financial"} onClick={() => { setFinancialReport(null); setTab("financial"); }}>Financial Report</button>
-        </div>
         <label className="reports-date">Date <input type="date" value={date} onChange={(event) => { setDailyReport(null); setFinancialReport(null); setDate(event.target.value); }} /></label>
       </div>
 
@@ -111,7 +109,7 @@ function Reports() {
                   </tr>
                 ))}</tbody>
               </table></div>
-            ) : <p className="reports-empty">{date === localToday() ? "No operational report data available for today" : "No operational report data available for selected date"}</p>}
+            ) : <p className="reports-empty" style={date === localToday() ? { textAlign: "center" } : undefined}>{date === localToday() ? "No operational report data available for today" : "No operational report data available for selected date"}</p>}
           </section>
         </>
       ) : (

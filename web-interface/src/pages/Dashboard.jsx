@@ -1,9 +1,7 @@
 import { useState, useEffect } from "react";
+import { useLocation } from "react-router-dom";
 import "../styles/Dashboard.css";
 
-import ParkingGrid from "../components/ParkingGrid";
-import GateControl from "../components/GateControl";
-import ParkComponentsControl from "../components/ParkComponentsControl";
 import RecentActivity from "../components/RecentActivity";
 import LastLoginAttempts from "../components/LastLoginAttempts";
 import { getSystemStatus, getParkingSpots, getActiveCars, getBarrierHealthData, getLights, getExhaustFans, getAlarms, getZones, calculateZoneStats, isLastKnownOnline, REFRESH_MS } from "../services/api";
@@ -41,17 +39,19 @@ function sameZone(parent, name) {
     && parent.replace(/\s+/g, "").toLowerCase() === name.replace(/\s+/g, "").toLowerCase();
 }
 
-// Last dashboard snapshot, kept while the app is open. Leaving for another page (Audit, Penalties...)
+// Last dashboard snapshot, kept while the app is open. Leaving for another page (Audit, Operations...)
 // unmounts this one, so without it the dashboard would show "Unavailable" again until the next refresh.
 let lastSnapshot = null;
 const emptyStats = { totalSpaces: 90, availableSpaces: null, occupiedSpaces: null, carsInside: null };
 const emptyComponents = { barriers: [], lights: [], fans: [], alarms: [] };
 
 function Dashboard() {
+  const location = useLocation();
+  const activeView = location.hash === "#system-status" ? "system-status" : location.hash === "#activity" ? "activity" : "overview";
   const [stats, setStats] = useState(() => lastSnapshot?.stats ?? emptyStats);
   const [spots, setSpots] = useState(() => lastSnapshot?.spots ?? []);
   const [zoneStats, setZoneStats] = useState(() => lastSnapshot?.zoneStats ?? []);
-  // Start from the last known status (shared across pages): switching tabs must not flash "offline"
+  // Start from the last known state: switching tabs must not flash "offline" / "Unavailable"
   const [systemOnline, setSystemOnline] = useState(isLastKnownOnline);
   const [alertsAvailable, setAlertsAvailable] = useState(() => lastSnapshot?.alertsAvailable ?? false);
   const [lastUpdated, setLastUpdated] = useState(() => lastSnapshot?.lastUpdated ?? null);
@@ -161,7 +161,7 @@ function Dashboard() {
       }
     } catch (err) {
       console.warn("Error refreshing dashboard:", err);
-      if (lastSnapshot) return;   // keep the last data on screen; the next refresh (3 s) tries again
+      if (lastSnapshot) return;   // keep the last data on screen; the next refresh tries again
       setSystemOnline(false);
       setAlertsAvailable(false);
       setStats(emptyStats);
@@ -175,7 +175,7 @@ function Dashboard() {
 
   useEffect(() => {
     fetchDashboardData();
-    const interval = setInterval(fetchDashboardData, REFRESH_MS);   // VITE_REFRESH_MS, default 5 s
+    const interval = setInterval(fetchDashboardData, REFRESH_MS);   // VITE_REFRESH_MS
     return () => clearInterval(interval);
   }, []);
 
@@ -186,7 +186,8 @@ function Dashboard() {
       {/* Header */}
       <header className="dashboard-header">
         <div>
-          <h1>Parking Dashboard</h1>
+          <p className="page-eyebrow">LIVE OPERATIONS / OVERVIEW</p>
+          <h1>Dashboard</h1>
           <p>
             Monitor and manage the car park in real time{" "}
             {lastUpdated && <span style={{ opacity: 0.6, fontSize: "0.85em" }}>· Updated {lastUpdated}</span>}
@@ -197,14 +198,17 @@ function Dashboard() {
           <span
             className="status-dot"
             style={{
-              backgroundColor: systemOnline ? "#22c55e" : "#ef4444",
+              backgroundColor: systemOnline ? "#22c55e" : "#94a3b8",
             }}
           ></span>
           {systemOnline ? "System Online" : "System Offline"}
         </div>
       </header>
 
+
       <LastLoginAttempts />
+
+      <div className="dashboard-view dashboard-overview" hidden={activeView !== "overview"}>
 
       {/* Full Car Park Warning */}
       {isCarParkFull && (
@@ -260,6 +264,11 @@ function Dashboard() {
         </div>
 
         <div className="stat-card">
+          <p>Active Alerts</p>
+          <h2 className={alertsAvailable ? "alert-value" : "unavailable-stat"}>{alertsAvailable ? activeAlerts.length : "Unavailable"}</h2>
+        </div>
+
+        <div className="stat-card">
           <p>Cars Inside</p>
           <h2 className={stats.carsInside === null ? "unavailable-stat" : ""}>{stats.carsInside ?? "Unavailable"}</h2>
         </div>
@@ -287,16 +296,6 @@ function Dashboard() {
         </div>
 
         <div className="operation-card">
-          <p>Active Alerts</p>
-          <h2 className={alertsAvailable ? "alert-value" : "environment-unknown"}>
-            {alertsAvailable ? activeAlerts.length : "Unavailable"}
-          </h2>
-          <span className="operation-detail">
-            Requires attention
-          </span>
-        </div>
-
-        <div className="operation-card">
           <p>Maintenance Due</p>
           <h2 className={systemOnline && totalComponents > 0 ? "maintenance-value" : "environment-unknown"}>
             {systemOnline && totalComponents > 0 ? issues.length : "Unavailable"}
@@ -309,34 +308,22 @@ function Dashboard() {
 
 
       {/* Zone Status Breakdown */}
-      <section style={{ marginTop: "28px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
-          <h3 style={{ margin: 0, fontSize: "1.15rem", fontWeight: 600 }}>Occupancy by Zone</h3>
-          <span style={{ fontSize: "0.85rem", color: "#6b7280" }}>Real-time zone distribution</span>
+      <section className="zone-overview">
+        <div className="zone-overview-heading">
+          <h3>Occupancy by Zone</h3>
+          <span>Real-time zone distribution</span>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))", gap: "16px" }}>
+        <div className="zone-overview-grid">
           {zoneStats.map((z) => {
             const freePercent = z.total > 0 ? Math.round((z.free / z.total) * 100) : 0;
             return (
-              <div
-                key={z.name}
-                style={{
-                  background: "white",
-                  borderRadius: "12px",
-                  padding: "18px 22px",
-                  border: "1px solid #e5e7eb",
-                  boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <strong style={{ fontSize: "1.05rem", color: "#1e293b" }}>{z.name}</strong>
+              <div className="zone-overview-card" key={z.name}>
+                <div className="zone-overview-card-heading">
+                  <strong>{z.name}</strong>
                   <span
+                    className="zone-availability"
                     style={{
-                      fontSize: "0.8rem",
-                      fontWeight: 600,
-                      padding: "3px 8px",
-                      borderRadius: "6px",
                       backgroundColor: z.total === 0 ? "#f3f4f6" : z.free > 0 ? "#dcfce7" : "#fee2e2",
                       color: z.total === 0 ? "#6b7280" : z.free > 0 ? "#166534" : "#991b1b",
                     }}
@@ -345,14 +332,14 @@ function Dashboard() {
                   </span>
                 </div>
 
-                <div style={{ marginTop: "12px", display: "flex", justifyContent: "space-between", fontSize: "0.85rem", color: "#64748b" }}>
+                <div className="zone-overview-metrics">
                   <span>Occupied: <strong>{z.occupied}</strong></span>
                   <span>Free: <strong>{z.free}</strong></span>
                   <span>Total: <strong>{z.total}</strong></span>
                 </div>
 
                 {/* Progress bar */}
-                <div style={{ marginTop: "10px", height: "8px", width: "100%", backgroundColor: "#e2e8f0", borderRadius: "999px", overflow: "hidden" }}>
+                <div className="zone-overview-track">
                   <div
                     style={{
                       height: "100%",
@@ -368,6 +355,11 @@ function Dashboard() {
         </div>
       </section>
 
+      </div>
+
+      <div className="dashboard-view dashboard-system-status" hidden={activeView !== "system-status"}>
+
+      <div className="dashboard-systems-grid">
       <section className="component-health">
         <div className="section-header">
           <div>
@@ -389,7 +381,8 @@ function Dashboard() {
           ))}
         </div>
 
-        <h3>Issues Requiring Attention</h3>
+        <details className="component-issues-disclosure">
+          <summary>Issues Requiring Attention <span>{issues.length ? `${issues.length} current` : totalComponents ? "No confirmed issues" : "Unavailable"}</span></summary>
         {issues.length ? (
           <div className="component-issues">
             {issues.map((issue, index) => (
@@ -410,6 +403,7 @@ function Dashboard() {
             {totalComponents > 0 && hasUnknownHealth && " (where health is reported; some component health data is unavailable)"}
           </p>
         )}
+        </details>
       </section>
 
       <section className="environment-section">
@@ -434,9 +428,6 @@ function Dashboard() {
                   <h3>{zone.name}</h3>
                   <p>CO Level: <strong>{reading === null ? "CO data unavailable" : `${reading} ppm`}</strong></p>
                   <p>Risk: <span className={`environment-risk environment-${riskStyle(zone.risk)}`}>{zone.risk || "Unavailable"}</span></p>
-                  <p>Auto ventilation: <strong className={zone.ventilating ? "environment-warning" : ""}>
-                    {zone.ventilating ? `ON (${zone.fansOn?.length ? zone.fansOn.join(", ") : "fans starting"})` : "Off"}
-                  </strong> <small>(auto from {zone.ventilateFrom || "Mid"} risk until Safe)</small></p>
                   <p>Ventilation: <strong>{zoneFans.length ? `Fans: ${runningFans.length} / ${zoneFans.length} Running` : "Fan data unavailable"}</strong></p>
                   {brokenFans.map((fan) => <p className="environment-fan-issue environment-critical" key={`broken-${fan.name}`}>{fan.name}: Broken</p>)}
                   {maintenanceFans.map((fan) => <p className="environment-fan-issue environment-warning" key={`maintenance-${fan.name}`}>{fan.name}: Under Maintenance</p>)}
@@ -447,6 +438,7 @@ function Dashboard() {
           </div>
         ) : <p className="environment-empty">CO data unavailable</p>}
       </section>
+      </div>
 
       <section className="active-alerts-section">
         <div className="section-header">
@@ -475,17 +467,12 @@ function Dashboard() {
         ) : <p className="active-alerts-empty">All systems operating normally</p>}
       </section>
 
-      {/* Interactive Parking Grid with Zone Filter */}
-      <ParkingGrid initialSpots={spots} onRefresh={fetchDashboardData} />
-
-      {/* Barrier Gate Control */}
-      <GateControl systemOnline={systemOnline} />
-
-      {/* Facility & Component Controls (Lights, Exhaust Fans, Alarms, Test Webhook) */}
-      <ParkComponentsControl systemOnline={systemOnline} />
+      </div>
 
       {/* Live Recent Activity */}
-      <RecentActivity />
+      <div className="dashboard-view dashboard-activity" hidden={activeView !== "activity"}>
+        <RecentActivity />
+      </div>
     </div>
   );
 }

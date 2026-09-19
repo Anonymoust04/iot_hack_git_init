@@ -3,6 +3,7 @@ import "./App.css";
 
 import Login from "./pages/Login.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
+import Operations from "./pages/Operations.jsx";
 import Account from "./pages/Account.jsx";
 import VehicleSearch from "./pages/VehicleSearch.jsx";
 import VehicleDetails from "./pages/VehicleDetails.jsx";
@@ -39,6 +40,8 @@ function App() {
             </Layout>
           }
         />
+
+        <Route path="/operations" element={<Layout><Operations /></Layout>} />
 
         {/* Vehicle Search */}
         <Route

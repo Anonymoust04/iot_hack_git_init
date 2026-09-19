@@ -860,6 +860,122 @@ body {
   margin-top: 12px;
 }
 
+/* Compact operations overview; detailed controls are on Operations. */
+.dashboard {
+  width: 100%;
+  max-width: 1440px;
+  min-width: 0;
+  min-height: 0;
+  margin: 0 auto;
+  padding: 0;
+}
+
+.dashboard-header { margin-bottom: 20px; gap: 16px; }
+.dashboard-view[hidden] { display: none !important; }
+.dashboard .dashboard-header > div:first-child,
+.dashboard .component-health .section-header > div:first-child,
+.dashboard .environment-section .section-header > div:first-child,
+.dashboard .active-alerts-section .section-header > div:first-child,
+.dashboard .activity-section .section-header > div:first-child { text-align: left; }
+.dashboard-header h1 { font-size: clamp(1.6rem, 2vw, 2rem); }
+.dashboard-header p { margin-top: 4px; }
+.page-eyebrow { margin: 0 0 5px !important; color: #64748b; font-size: .68rem; font-weight: 800; letter-spacing: .12em; }
+.system-status { border: 1px solid #e2e8f0; box-shadow: none; white-space: nowrap; }
+.stats { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.stat-card, .operation-card { min-width: 0; padding: 16px 18px; border-radius: 10px; box-shadow: none; }
+.stat-card p, .operation-card p { margin-bottom: 6px; font-size: .76rem; }
+.stat-card h2 { font-size: clamp(1.4rem, 2vw, 1.9rem); line-height: 1.2; white-space: nowrap; }
+.stat-card h2.unavailable-stat { font-size: clamp(.9rem, 1.4vw, 1.2rem); }
+.operations-overview { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.operation-card h2 { font-size: clamp(1.1rem, 1.6vw, 1.45rem); margin-bottom: 4px; white-space: nowrap; }
+.zone-overview, .component-health, .environment-section, .active-alerts-section, .activity-section { margin-top: 18px; }
+.dashboard-systems-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.dashboard-live-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 14px; }
+.dashboard-live-grid > section { min-width: 0; }
+.dashboard-live-grid .active-alert-row { grid-template-columns: 78px minmax(0, 1fr) auto; }
+.dashboard-live-grid .active-alert-row > :nth-child(3) { grid-column: 2 / -1; }
+.dashboard-live-grid .active-alert-row > :nth-child(4) { grid-column: 2; }
+.dashboard-live-grid .active-alert-row > :nth-child(5) { grid-column: 3; }
+.dashboard-live-grid .activity-table { min-width: 600px; }
+.dashboard-systems-grid > section { min-width: 0; }
+.dashboard-systems-grid .component-health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.dashboard-systems-grid .environment-grid { grid-template-columns: 1fr; }
+.dashboard-systems-grid .environment-card { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; gap: 3px 12px; }
+.dashboard-systems-grid .environment-card h3 { grid-column: 1 / -1; margin-bottom: 3px; }
+.dashboard-systems-grid .environment-card p { margin: 2px 0; }
+.zone-overview-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 9px; }
+.zone-overview-heading h3 { margin: 0; font-size: 1.05rem; }
+.zone-overview-heading span { color: #64748b; font-size: .76rem; }
+.zone-overview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.zone-overview-card { min-width: 0; padding: 13px 15px; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; }
+.zone-overview-card-heading, .zone-overview-metrics { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.zone-overview-card-heading strong { color: #172033; font-size: .9rem; }
+.zone-availability { padding: 3px 8px; border-radius: 5px; font-size: .72rem; font-weight: 700; white-space: nowrap; }
+.zone-overview-metrics { margin-top: 9px; color: #64748b; font-size: .74rem; flex-wrap: wrap; }
+.zone-overview-metrics strong { color: #334155; }
+.zone-overview-track { margin-top: 10px; height: 5px; width: 100%; background: #e2e8f0; border-radius: 999px; overflow: hidden; }
+.component-health, .environment-section, .active-alerts-section, .activity-section, .parking-section, .gate-section { padding: 18px 20px; border-radius: 10px; box-shadow: none; }
+.section-header { margin-bottom: 14px; }
+.section-header h2 { font-size: 1.1rem; }
+.section-header p { font-size: .8rem; }
+.component-health-grid, .environment-grid { gap: 10px; }
+.component-health-card, .environment-card { padding: 13px 15px; border-radius: 8px; }
+.component-health-card p { margin: 5px 0 8px; font-size: .82rem; }
+.environment-card h3 { margin-bottom: 8px; font-size: .98rem; }
+.environment-card p { margin: 6px 0; font-size: .8rem; }
+.component-issues-disclosure { margin-top: 14px; border-top: 1px solid #e5e7eb; padding-top: 10px; }
+.component-issues-disclosure summary { cursor: pointer; color: #334155; font-size: .82rem; font-weight: 700; }
+.component-issues-disclosure summary span { margin-left: 7px; color: #64748b; font-weight: 500; }
+.component-issues-disclosure .component-issues, .component-issues-disclosure .component-health-empty { margin-top: 12px; }
+.active-alert-row { padding: 9px 11px; gap: 10px; }
+.activity-section { margin-bottom: 0; }
+.activity-table th, .activity-table td { padding: 10px 12px; }
+.activity-section .table-container { max-height: 330px; overflow-y: auto; }
+.activity-section .activity-table thead { position: sticky; top: 0; z-index: 1; background: #fff; }
+.active-alerts-list { max-height: 255px; overflow-y: auto; }
+.operations-page .parking-section { margin-top: 16px; }
+.operations-page .parking-section,
+.operations-page .gate-section,
+.operations-page .park-components-section { text-align: left; }
+.operations-page .gate-section, .operations-page .park-components-section { margin-top: 18px; }
+.operations-page .gate-section { border-left: 3px solid #334155; }
+.operations-page .gate-grid { gap: 12px; }
+.operations-page .gate-card { padding: 14px 16px; background: #fbfcfe; }
+.operations-page .gate-info { margin-bottom: 12px; }
+.operations-page .gate-button { padding: 8px 12px; font-size: .82rem; }
+.operations-page .park-components-section { padding: 18px 20px; border: 1px solid #e2e8f0; border-left: 3px solid #334155; border-radius: 10px; background: #fff; }
+.operations-page .parking-grid { gap: 8px; }
+.operations-page .parking-spot { min-height: 68px; border-width: 1px; border-radius: 7px; }
+.operations-page .parking-spot strong { font-size: .86rem; }
+
+@media (max-width: 1050px) {
+  .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .operations-overview { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .dashboard-systems-grid { grid-template-columns: 1fr; }
+  .dashboard-live-grid { grid-template-columns: 1fr; }
+  .dashboard-live-grid .active-alert-row { grid-template-columns: 90px minmax(0, 1fr) auto; }
+  .dashboard-systems-grid .environment-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .dashboard-systems-grid .environment-card { display: block; }
+  .zone-overview-grid { gap: 9px; }
+}
+
+@media (max-width: 700px) {
+  .stats, .operations-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .component-health-grid, .environment-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard-systems-grid .environment-grid { grid-template-columns: 1fr; }
+  .zone-overview-grid { grid-template-columns: 1fr; }
+  .dashboard-live-grid .active-alert-row { grid-template-columns: 1fr 1fr; }
+  .dashboard-live-grid .active-alert-row > :nth-child(3) { grid-column: 1 / -1; }
+  .dashboard-live-grid .active-alert-row > :nth-child(4) { grid-column: 1; }
+  .dashboard-live-grid .active-alert-row > :nth-child(5) { grid-column: 2; }
+}
+
+@media (max-width: 480px) {
+  .stats, .operations-overview, .component-health-grid, .environment-grid { grid-template-columns: 1fr; }
+  .dashboard-systems-grid .component-health-grid { grid-template-columns: 1fr; }
+  .stat-card h2, .operation-card h2 { white-space: normal; }
+}
+
 @media (max-width: 900px) {
   .active-alert-row {
     grid-template-columns: 90px minmax(120px, 1fr) minmax(150px, 2fr);
