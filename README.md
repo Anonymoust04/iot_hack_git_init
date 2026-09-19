@@ -1,144 +1,140 @@
 # PARK//CONTROL: Smart Car Park Management System
 
-A web-based car park management system for the hackathon **Park Simulator**. It detects arriving cars, guides
-them to a free spot of the right type, charges them at the exit, keeps gates, lights and exhaust fans running
-(with preventive maintenance and CO monitoring), and shows everything live on a role-protected dashboard.
+Car park management system for the hackathon **Park Simulator**. It guides arriving cars to a free spot, charges
+them at the exit, keeps gates, lights and exhaust fans working (preventive maintenance, CO ventilation), and shows
+everything live on a role-protected dashboard.
 
-**Stack:** Python FastAPI · SQLAlchemy · MySQL 8 (Aiven, TLS) · React + Vite · Cloudflare quick tunnel (live demo)
+**Stack:** FastAPI · SQLAlchemy · MySQL 8 (Aiven) · React + Vite · Vercel + ngrok
 
 ## Demo
 
-- **Demo video:** _add the link here_ (simulator and dashboard side by side)
-- **Live demo:** started on request from the team laptop with `scripts\live-demo.ps1`, which prints a public
-  `https://….trycloudflare.com` link (see [Live demo](#live-demo-public-link)).
-- **Slides:** see the submitted PDF.
+| | |
+| --- | --- |
+| **Dashboard** | https://park-control-beta.vercel.app · log in with the admin account |
+| **API docs** | https://confidant-delivery-eloquent.ngrok-free.dev/docs |
+| **Video** | _add link_ |
 
-## What we built
+The dashboard is hosted on Vercel, but the **simulator and backend run on the team laptop**: the backend has to
+reach the simulator on `127.0.0.1`, so it is published through a fixed ngrok address. The link shows live data
+while that laptop is signed in, awake and online (see [Public demo](#public-demo)).
+
+## Features
 
 ### Level 1: a working car park
-- **Simulator integration:** logs in to the simulator API, lists spots and gates, opens/closes gates, sends cars
-  to spots or away (`leavepark`), and charges them at the exit.
-- **Webhook listener** (`POST /webhook`): every simulator event is received, checked, and stored in MySQL.
-- **Car flow:** an arriving car gets a free spot, the entrance gate opens and closes behind it; at the exit the car is
-  charged once, the exit gate opens, and the car leaves. A full park sends new cars away at once so the entrance
-  never blocks.
-- **Dashboard:** free / occupied spots per zone, gate status and control, cars inside, recent activity, vehicle
-  search and details, all refreshed live.
-- **Authentication and roles:** JWT login with bcrypt-hashed passwords; **Admin** and **Operator** roles.
-- **History:** car arrivals, parking, departures and events are stored and searchable by plate and time.
+- Logs in to the simulator API, lists spots and gates, opens and closes gates, sends cars to a spot or to
+  `leavepark`, and charges them at the exit.
+- `POST /webhook` receives every simulator event. Each one is checked (MD5 signature, repeated `EventId`,
+  `SequenceId` gaps) and stored in MySQL before it is processed.
+- Dashboard: free and occupied spots per zone, gate status and control, cars inside, recent activity, vehicle
+  search and details, refreshed every few seconds.
+- Login with **Admin** and **Operator** roles (JWT, bcrypt passwords), and a searchable history of visits and events.
 
 ### Level 2: things break, the car park shouldn't
-- **3 zones, multiple entrances and exits:** each entrance and exit has its own gate worker, so exiting cars never
-  wait behind entering ones.
-- **Failure handling:** a component is checked before it is operated (no commands to broken gates); broken and
-  under-maintenance components are detected, recorded and shown on the dashboard (`/component-health`).
-- **Usage cycles and preventive maintenance:** usage of spots, gates, lights and fans is tracked, and repair
-  commands are sent **before** a component reaches its limit.
-- **Lights and exhaust fans:** lights follow the simulator's day/night time; fans switch on automatically when a
-  zone's CO level rises.
-- **RBAC:** Admins manage users (create, edit, remove, change role and authorities) from the Admin page.
-  Per-user authorities (`USER_MANAGEMENT`, `FINANCIAL_REPORTS`, `GATE_CONTROL`, `LIGHT_CONTROL`, `FAN_CONTROL`,
-  `REPAIR`) are stored in the database and checked by the backend (**403** without the authority).
-- **Login attempts:** every successful and failed login is recorded (never the password), and the last three are
-  shown after login.
-- **Audit log:** important actions, changes, repairs and system events: who, what, which component, success or
-  failure. Admin only; secrets in details are masked.
-- **Penalties:** every penalty the simulator sends is stored and listed on its own page with totals by type.
-- **Operational event log and daily summary:** searchable events plus a per-day summary (cars in/out, penalties,
-  broken/fixed components, CO alerts, busiest hour) for the daily report.
-- **Webhook safety:** MD5 signature check, duplicate `EventId`s ignored, `SequenceId` gaps logged; every payload is
-  stored raw before processing.
+- **3 zones, 3 entrances, 3 exits:** every gate has its own worker, so exiting cars never wait behind entering ones.
+- **Failure handling:** a component is checked before it is operated; broken and under-maintenance components are
+  tracked and shown on the dashboard.
+- **Usage cycles and preventive maintenance:** usage of spots, gates, lights and fans is counted, and repairs are
+  sent before a component wears out.
+- **Lights and CO:** lights follow the simulator's day/night clock. Fans switch on when a zone's CO risk reaches
+  **Mid** (the simulator's own rating: Safe → Mid → High → Critical) and switch off once it is **Safe** again.
+  Per-zone readings come from `/co-status`, fed by CO webhooks plus a periodic check.
+- **RBAC:** Admins manage users and their authorities (`USER_MANAGEMENT`, `FINANCIAL_REPORTS`, `GATE_CONTROL`,
+  `LIGHT_CONTROL`, `FAN_CONTROL`, `REPAIR`); the backend answers **403** without the authority.
+- **Login attempts:** every success and failure is recorded (never the password), and the last three are shown
+  after login.
+- **Audit log** (Admin only): operator actions, user changes and system events (component broken/fixed,
+  `AUTO_REPAIR`, `AUTO_FAN_ON/OFF`), each with who, what, target and result.
+- **Penalties page** with totals by type, plus an **operational event log and daily summary** for the daily report.
 
 ## How it fits together
 
 ```
- Park Simulator ──webhook──▶ POST /webhook ──┬─▶ main.py: entry/exit gate workers, spot choice, charging,
-   (this laptop)                             │            lights / fans / CO, usage cycles, preventive repair
+ Park Simulator ──webhook──▶ POST /webhook ──┬─▶ main.py: gate workers, spot choice, charging,
+   (team laptop)                             │            lights / fans / CO, maintenance
         ▲                                    └─▶ db_hook.py: checks + copy ──▶ MySQL (Aiven)
-        └──── REST commands (open gate, goto, charge, repair, lights, fans) ◀── main.py
- Browser (React dashboard) ──▶ FastAPI /api/... ──▶ MySQL        (live data refreshed every few seconds)
+        └──── commands (open gate, goto, charge, repair, lights, fans) ◀── main.py
+ Browser ──▶ Vercel dashboard ──▶ FastAPI /api/... ──▶ MySQL
 ```
 
-MySQL is the dashboard's source of truth. The simulator's `list-*` calls have a simulated operating cost, so spots
-and gates are re-read from the simulator only every `SIM_SYNC_SECONDS`; webhooks keep the data live in between.
+MySQL is the dashboard's source of truth. The simulator's `list-*` calls have a simulated cost, so spots and gates
+are re-read only every `SIM_SYNC_SECONDS`; webhooks keep the data live in between.
 
-## How to run
+## Run it locally
 
-**Needs:** Windows, Python 3.12+, Node.js 20+, the Park Simulator (`ParkingSimulator-win-x64`), and a network that
-allows MySQL on port 27109 (some venue Wi-Fi networks block it; a phone hotspot works).
+**Needs:** Windows, Python 3.12+, Node 20+, the Park Simulator, and a network that allows MySQL on port 27109
+(some venue Wi-Fi blocks it; a phone hotspot works).
 
-1. **Configure.** Copy `.env.example` to `.env` (repo root) and fill in the `DB_*` values (Aiven), `JWT_SECRET`, and
-   the simulator login (`SIM_EMAIL` / `SIM_PASSWORD` = `Name` / `Password` in the simulator's `settings.json`).
-   In the simulator's `settings.json`: `"WebhookUrl": "http://127.0.0.1:8000/webhook"`.
-2. **Install once.**
+1. **Configure** `.env` in the repo root (copy `.env.example`): the `DB_*` values from Aiven, `JWT_SECRET`,
+   `SIM_BASE_URL=http://127.0.0.1:9898/api/v1`, and `SIM_EMAIL` / `SIM_PASSWORD` from the simulator's
+   `settings.json`, which must contain `"WebhookUrl": "http://127.0.0.1:8000/webhook"`.
+2. **Install once**
    ```powershell
    cd backend;  python -m venv fastapi-env;  .\fastapi-env\Scripts\Activate.ps1;  pip install -r requirements.txt
    cd ..\web-interface;  npm install
    ```
-3. **Start, in this order:**
-   1. the **simulator**, with the level loaded;
-   2. the **backend**: `cd backend\fastapi_project` then `..\fastapi-env\Scripts\python -m uvicorn main:app`
-      (wait for `Application startup complete`, about 30–40 s: it creates missing tables, seeds the admin and syncs
-      the simulator);
-   3. the **frontend**: `cd web-interface` then `npm run dev`, and open http://localhost:5173.
-4. **Log in** with the admin from `BOOTSTRAP_ADMIN_USERNAME` / `BOOTSTRAP_ADMIN_PASSWORD` (created on first start).
-   API documentation: http://127.0.0.1:8000/docs.
+3. **Start** the simulator (with the level loaded), then the backend, then the frontend:
+   ```powershell
+   cd backend\fastapi_project;  ..\fastapi-env\Scripts\python -m uvicorn main:app    # ready after ~30-40 s
+   cd web-interface;            npm run dev                                          # http://localhost:5173
+   ```
+   Tables are created automatically at startup; nothing needs a reset. API docs: http://127.0.0.1:8000/docs.
 
-Tables are created automatically (`database/schema.sql`, `CREATE TABLE IF NOT EXISTS`); nothing needs a reset.
+## Public demo
 
-### Live demo (public link)
-
-Close your own backend/frontend, start the simulator, then from the repo root:
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\live-demo.ps1
-```
-It downloads `cloudflared` if needed, opens two free Cloudflare quick tunnels, starts the backend and frontend
-configured for them, and prints the public **DEMO LINK**. The simulator stays on the laptop (the backend reaches it
-on `127.0.0.1`), so the link works while the laptop is on and online. Press Enter in the script window to stop.
-
-### Tests
+**Automatic (already installed on the demo laptop).** At every Windows sign-in a Startup shortcut runs
+`scripts\auto-start-public-backend.ps1`, which opens the simulator and keeps FastAPI and the ngrok tunnel running,
+restarting either if it stops. Load the level in the simulator window, keep the laptop awake and online, then open
+the Vercel link. Status is logged to `%LOCALAPPDATA%\ParkControl\auto-start.log`.
 
 ```powershell
-cd backend;  .\fastapi-env\Scripts\Activate.ps1;  pytest
+# install once (already done on the demo laptop) / remove again
+powershell -ExecutionPolicy Bypass -File scripts\install-public-autostart.ps1 -Domain confidant-delivery-eloquent.ngrok-free.dev
+powershell -ExecutionPolicy Bypass -File scripts\install-public-autostart.ps1 -Remove
+
+# start it by hand in the current session (no sign-out needed)
+powershell -ExecutionPolicy Bypass -File scripts\auto-start-public-backend.ps1 -Domain confidant-delivery-eloquent.ngrok-free.dev
 ```
-Tests run against a separate MySQL database (`TEST_DB_NAME`, created and wiped automatically), never the real one.
+
+`scripts\public-backend.ps1 -Domain <domain>` does the same for a single session and stops when you press Enter.
+Use only one of these at a time: they all use port 8000.
+
+**Redeploy the frontend** after changing it:
+```powershell
+cd web-interface
+npx vercel deploy --prod --build-env VITE_API_BASE_URL=https://confidant-delivery-eloquent.ngrok-free.dev --build-env VITE_REFRESH_MS=3000
+```
+
+**Tests:** `cd backend; pytest` — they use a separate database (`TEST_DB_NAME`), never the real one. Don't run them
+during a demo: they start a second copy of the automation.
 
 ## Assumptions
 
-- **The simulator runs on the same computer as the backend.** It sends webhooks to `127.0.0.1:8000`, and the
-  backend sends commands to it on `127.0.0.1:9898`. The public demo link tunnels only the dashboard and the API.
-- **Webhook signatures:** the simulator we tested sends `"Signature": null`. A **wrong** signature is always
-  rejected and logged; unsigned webhooks are accepted, and `WEBHOOK_REQUIRE_SIGNATURE=true` rejects them too if a
-  level signs its webhooks.
-- **Webhooks can arrive out of order** (the simulator sends them concurrently), so spots and gates are also
-  re-synced from the simulator every `SIM_SYNC_SECONDS` (default 10 s); a visit with no event for
-  `STALE_SESSION_MINUTES` is closed (its departure event was missed).
-- **Time:** stored in UTC; a car's visit times use the simulator's own clock (`ServerDateTime`), because it runs at
-  a different speed than real time.
-- **The simulator reports only a car count per spot, not plates.** Plates come from the webhooks; a car whose
-  arrival webhook was missed (backend offline) can't be identified, so the backend should run before cars arrive.
-- **Roles:** an Admin has every authority; a new Operator starts with gate, light, fan and repair authorities, and
-  an Admin can change them per user.
-- **Penalties** are the simulator's own `penalty` events; we store and report them, we don't invent fines.
-- **Secrets** (`.env`) are not in the repository; `certs/aiven-ca.pem` is Aiven's public CA certificate.
+- The simulator runs on the same computer as the backend (webhooks to `127.0.0.1:8000`, commands to `:9898`).
+- The simulator we tested sends `"Signature": null`. Unsigned webhooks are accepted, a **wrong** signature is always
+  rejected, and `WEBHOOK_REQUIRE_SIGNATURE=true` rejects unsigned ones too.
+- Webhooks can arrive out of order, so spots and gates are also re-synced from the simulator, and a visit with no
+  event for `STALE_SESSION_MINUTES` is closed.
+- Times are stored in UTC; a car's visit times use the simulator's own clock (`ServerDateTime`).
+- The simulator reports only a car count per spot, so plates come from webhooks: start the backend before cars arrive.
+- Penalties are the simulator's own penalty events; we store and report them.
+- Parking charges are not stored in the database yet, so the financial report is empty.
 
-## Project structure
+## Layout
 
 ```
-backend/fastapi_project/main.py   car flow, gate workers, lights/fans/CO, usage cycles, preventive maintenance
-backend/fastapi_project/db_hook.py MySQL layer: CORS, API routers, stores every webhook, periodic simulator sync
-backend/app/                      models, services (parking, audit, penalties, login attempts, users/RBAC, ...), API routes
-backend/tests/                    pytest suite (runs on a separate test database)
-database/schema.sql               all table definitions        web-interface/   React + Vite dashboard
-docs/                             Level 1/2 checklists, event types, simulator API notes, team task split
-scripts/live-demo.ps1             one-command public demo link
+backend/fastapi_project/main.py     car flow, gate workers, lights/fans/CO, maintenance, simulator API
+backend/fastapi_project/db_hook.py  MySQL layer: CORS, API routers, stores webhooks, periodic sync
+backend/app/                        models, services (parking, audit, penalties, login attempts, ...), API routes
+backend/tests/                      pytest suite              database/schema.sql   all table definitions
+web-interface/                      React dashboard           scripts/              deployment scripts
+docs/                               level checklists, event types, simulator API notes
 ```
 
 ## Team
 
 | Member | Area |
 | --- | --- |
-| Zhi Hong (Tee) | Automation (gates, lights, fans, CO, usage cycles, preventive maintenance) and FastAPI integration |
-| Jiaying | Database, logging and security data (login attempts, audit, penalties, event log, users and authorities) |
-| Jackson | Admin / RBAC user interface |
+| Zhi Hong (Tee) | Automation: gates, lights, fans, CO, usage cycles, preventive maintenance; FastAPI integration |
+| Jiaying | Database, logging and security: login attempts, audit, penalties, event log, users and authorities |
+| Jackson | Admin / RBAC interface |
 | Christen | Operations dashboard, reports and alerts interface |

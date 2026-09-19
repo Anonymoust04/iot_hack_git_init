@@ -269,7 +269,7 @@ function Dashboard() {
         </div>
 
         <div className="stat-card">
-          <p>Cars Inside</p>
+          <p>Total Car Entry</p>
           <h2 className={stats.carsInside === null ? "unavailable-stat" : ""}>{stats.carsInside ?? "Unavailable"}</h2>
         </div>
       </section>
@@ -291,7 +291,9 @@ function Dashboard() {
             {worstCoZone ? `${coReading(worstCoZone)} ppm` : "Unavailable"}
           </h2>
           <span className="operation-detail">
-            {worstCoZone ? `${worstCoZone.name} · ${worstCoZone.risk || "Risk unavailable"}` : "CO data unavailable"}
+            {zones.length
+              ? zones.map((zone) => `${zone.name} ${coReading(zone) ?? "?"} ppm (${zone.risk || "?"})`).join(" · ")
+              : "CO data unavailable"}
           </span>
         </div>
 
@@ -317,6 +319,7 @@ function Dashboard() {
         <div className="zone-overview-grid">
           {zoneStats.map((z) => {
             const freePercent = z.total > 0 ? Math.round((z.free / z.total) * 100) : 0;
+            const co = zones.find((zone) => sameZone(zone.name, z.name));   // CO reading of this zone
             return (
               <div className="zone-overview-card" key={z.name}>
                 <div className="zone-overview-card-heading">
@@ -336,6 +339,9 @@ function Dashboard() {
                   <span>Occupied: <strong>{z.occupied}</strong></span>
                   <span>Free: <strong>{z.free}</strong></span>
                   <span>Total: <strong>{z.total}</strong></span>
+                  <span>CO: <strong className={`environment-${co ? riskStyle(co.risk) : "unknown"}`}>
+                    {co && coReading(co) !== null ? `${coReading(co)} ppm · ${co.risk || "?"}` : "Unavailable"}
+                  </strong>{co?.ventilating ? " · fans ON" : ""}</span>
                 </div>
 
                 {/* Progress bar */}
