@@ -23,10 +23,11 @@ recent_car_arrivals = []
 active_cars = {}     # car_plate -> { entry_time, car_type, assigned_spot, planned_duration, charged }
 charged_cars = set()  # set of car_plates to prevent double charging penalties
 
-# Parallel Dual Queues: Independent Entrance and Exit processing
+# Parallel Dual Queues & Dedicated Gate B Queue
 entry_queue = asyncio.Queue()
 exit_queue = asyncio.Queue()
-spot_lock = asyncio.Lock()  # Lock to ensure thread-safe spot selection
+gate_b_queue = asyncio.Queue()  # Dedicated Gate B Queue
+spot_lock = asyncio.Lock()      # Lock to ensure thread-safe spot selection
 
 
 async def entry_worker():
@@ -43,7 +44,7 @@ async def entry_worker():
 
 
 async def exit_worker():
-    """Background worker for EXIT processing (FCFS among exit cars, running in parallel with entrance)."""
+    """Background worker for EXIT processing (FCFS among exit cars)."""
     print("[EXIT WORKER] Exit Queue Worker started.")
     while True:
         data = await exit_queue.get()
@@ -55,11 +56,49 @@ async def exit_worker():
             exit_queue.task_done()
 
 
+async def gate_b_worker():
+    """Dedicated background worker/thread controlling Gate B opening & closing after payment notification."""
+    print("[GATE B WORKER] Dedicated Gate B Controller Worker started.")
+    while True:
+        event = await gate_b_queue.get()
+        car_plate = event.get("car_plate", "")
+        gate_name = event.get("gate_name", "GateB")
+        
+        print(f"[GATE B WORKER] Payment notification received for car {car_plate}. Opening gate {gate_name}...")
+        try:
+            # 1. Open Gate B
+            await api_open_barrier_gate(gate_name)
+            
+            # 2. Guide car to leave
+            print(f"[GATE B WORKER] Guiding car {car_plate} to leave park...")
+            await api_send_car_to_destination(car_plate, "leavepark")
+            
+            # 3. Wait 3 seconds for car to pass through
+            print(f"[GATE B WORKER] Waiting 3s for car {car_plate} to clear gate {gate_name}...")
+            await asyncio.sleep(3.0)
+            
+            # 4. Close Gate B (returns to default closed state)
+            print(f"[GATE B WORKER] Closing exit gate {gate_name}...")
+            await api_close_barrier_gate(gate_name)
+        except Exception as e:
+            print(f"[GATE B WORKER ERROR] Failed to operate gate {gate_name} for {car_plate}: {e}")
+        finally:
+            gate_b_queue.task_done()
+
+
 @app.on_event("startup")
 async def startup_event():
-    """Start parallel Entrance and Exit background workers on application startup."""
+    """Start Entrance, Exit, and dedicated Gate B background workers on application startup."""
     asyncio.create_task(entry_worker())
     asyncio.create_task(exit_worker())
+    asyncio.create_task(gate_b_worker())
+    try:
+        print("[STARTUP] Ensuring GateB (Exit Gate) is CLOSED by default...")
+        await api_close_barrier_gate("GateB")
+    except Exception as e:
+        print(f"[STARTUP NOTE] Could not close GateB on startup: {e}")
+
+
 
 
 # =====================================================================
@@ -289,10 +328,10 @@ async def process_car_entry(data: dict):
 
 
 async def process_car_exit(data: dict):
-    """Internal logic to handle a car arriving at an exit gate with single-charge enforcement & immediate gate open."""
+    """Internal logic to handle a car arriving at GateB / exit gate, verifying payment before opening gate."""
     car_plate = data.get("CarPlateNumber", "")
     car_type = data.get("CarType", "Normal")
-    spot_name = data.get("SpotName", "")
+    spot_name = data.get("SpotName", "") or "GateB"
     planned_duration = float(data.get("PlannedParkingDurationInMinutes", 1) or 1)
     server_time = data.get("ServerDateTime", "")
 
@@ -301,26 +340,13 @@ async def process_car_exit(data: dict):
 
     print(f"[EXIT LOGIC] Car {car_plate} ({car_type}) arrived at exit gate {spot_name}.")
 
-    # Step 1: Single-Charge Enforcement (Avoid double charging penalty or runaway cars)
-    if car_plate not in charged_cars:
-        # Mark as charged immediately to block duplicate concurrent webhooks
-        charged_cars.add(car_plate)
-        
-        car_info = active_cars.get(car_plate, {})
-        duration = planned_duration
+    payment_verified = False
 
-        # Calculate duration from entry time if available
-        entry_time_str = car_info.get("entry_time")
-        if entry_time_str and server_time:
-            try:
-                fmt = "%Y-%m-%d %H:%M:%S"
-                dt_entry = datetime.strptime(entry_time_str, fmt)
-                dt_exit = datetime.strptime(server_time, fmt)
-                elapsed_minutes = (dt_exit - dt_entry).total_seconds() / 60.0
-                if elapsed_minutes > 0:
-                    duration = max(1.0, elapsed_minutes)
-            except Exception:
-                duration = car_info.get("planned_duration", planned_duration)
+    # Step 1: Request Payment (Single-Charge Enforcement)
+    if car_plate not in charged_cars:
+        car_info = active_cars.get(car_plate, {})
+
+        duration = car_info.get("planned_duration", planned_duration)
 
         # Parking Cost = Total minutes spent
         parking_cost = float(max(1, round(duration)))
@@ -334,30 +360,30 @@ async def process_car_exit(data: dict):
         try:
             # Isolated API call for payment
             await api_charge_car(car_plate, parking_cost, charging_cost)
+            charged_cars.add(car_plate)
             if car_plate in active_cars:
                 active_cars[car_plate]["charged"] = True
+            payment_verified = True
             print(f"[EXIT LOGIC] Payment verified & recorded for {car_plate}.")
         except Exception as e:
-            print(f"[EXIT LOGIC ERROR] Charging request failed for {car_plate}: {e}")
+            print(f"[EXIT LOGIC ERROR] Payment failed for {car_plate}: {e}")
     else:
-        print(f"[EXIT LOGIC] Payment already verified for {car_plate}. Skipping request.")
+        payment_verified = True
+        print(f"[EXIT LOGIC] Payment already verified for {car_plate}.")
 
-    # Step 2: Open Exit Gate immediately so car does not wait/run away
-    try:
-        print(f"[EXIT LOGIC] Opening exit gate {spot_name} for {car_plate}...")
-        await api_open_barrier_gate(spot_name)
-    except Exception as e:
-        print(f"[EXIT LOGIC ERROR] Failed to open exit gate {spot_name}: {e}")
+    # Step 2: Notify dedicated Gate B worker thread if payment is verified
+    if payment_verified:
+        target_gate = spot_name or "GateB"
+        print(f"[EXIT LOGIC] Payment verified for {car_plate}. Notifying Gate B worker thread for gate {target_gate}...")
+        await gate_b_queue.put({
+            "car_plate": car_plate,
+            "gate_name": "GateB",
+        })
+    else:
+        print(f"[EXIT LOGIC] Payment NOT verified for {car_plate}. Gate {spot_name} remains CLOSED.")
 
-    # Step 3: Direct car to leavepark/exit
-    try:
-        print(f"[EXIT LOGIC] Guiding car {car_plate} to leave park...")
-        await api_send_car_to_destination(car_plate, "leavepark")
-    except Exception as e:
-        print(f"[EXIT LOGIC ERROR] Directing car {car_plate} to leave failed: {e}")
 
-    # Step 4: Auto-close gate behind car after 3s delay
-    asyncio.create_task(auto_close_gate_after_delay(spot_name, delay=3.0))
+
 
 
 

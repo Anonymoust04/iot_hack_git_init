@@ -1,21 +1,44 @@
+
 # Simulator Executable & Settings Directory
 ParkingSimulator-win-x64/
 *.exe
 *.dll
 *.db
 .env
+# Secrets
+.env
+.env.*
+!.env.example
 
-# Python & Virtual Environments
-backend/fastapi-env/
-venv/
-.venv/
-env/
+# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+*backend/fastapi-env/
+# Node (frontend)
+node_modules/
+dist/
+build/
+.next/
 
-# IDE & OS Files
+# Local DB / logs
+*.db
+*.sqlite3
+*.log
+
+# Editors / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Simulator executable & settings (from api_simulation_branch)
+ParkingSimulator-win-x64/
+*.exe
+*.dll
+env/
