@@ -14,18 +14,18 @@ and it's committed). This is the one place to see what's left before the PR.
 - [x] `login_attempts` table added to `database/schema.sql`
 - [x] Tests written (`tests/test_login_attempts.py`)
 - [x] Tests passed offline (SQLite substitute, MySQL blocked at the time)
-- [ ] Tests passed on real MySQL (phone hotspot) — rerun `pytest tests/test_login_attempts.py -v`
+- [x] Tests passed on real MySQL (Aiven): 8 passed on `carpark_test_login_attempts`
 - [x] Committed (`bf9fc72`)
 - [ ] Wired into `auth.py` / `db_hook.py` by Zhi Hong (handoff below, not my job)
 
 ### Task A — Audit logs (agent 1)
-- [ ] Files created: `models/audit_log.py`, `services/audit.py`, `routes/audit.py`, `tests/test_audit.py`
-- [ ] `audit_logs` table appended to `database/schema.sql` (nothing else in that file touched)
-- [ ] Tests pass on `carpark_test_audit`
-- [ ] `tests/test_schema_matches_models.py` still passes (proves the appended table matches the model)
-- [ ] Reviewed: `git status` shows only this task's files
+- [x] Files created: `models/audit_log.py`, `services/audit.py`, `routes/audit.py`, `tests/test_audit.py`
+- [x] `audit_logs` table appended to `database/schema.sql` (nothing else in that file touched: +24 lines)
+- [x] Tests pass on `carpark_test_audit` (12 passed, real Aiven MySQL)
+- [x] `tests/test_schema_matches_models.py` still passes (3 passed with the new table)
+- [x] Reviewed: `git status` shows only this task's files (+ Task B's, which belong to agent 2)
 - [ ] Committed
-- [ ] Handoff table written (where Zhi Hong should call `record_audit(...)`)
+- [x] Handoff table written (see "Handoff: audit call sites" under Task A)
 
 ### Task B — Penalties page data (agent 2)
 - [x] Files created: `services/penalties.py`, `routes/penalties.py`, `tests/test_penalties.py`
@@ -35,9 +35,9 @@ and it's committed). This is the one place to see what's left before the PR.
 - [ ] Committed
 
 ### Task C — Event log search + daily summary (agent 3)
-- [ ] Files created: `services/event_log.py`, `routes/event_log.py`, `tests/test_event_log.py`, `docs/EVENT_TYPES.md`
-- [ ] No new table added (reads existing `events`)
-- [ ] Tests pass on `carpark_test_events`
+- [x] Files created: `services/event_log.py`, `routes/event_log.py`, `tests/test_event_log.py`, `docs/EVENT_TYPES.md`
+- [x] No new table added (reads existing `events`)
+- [x] Tests pass on `carpark_test_events` (5 passed on MySQL)
 - [ ] Reviewed: `git status` shows only this task's files
 - [ ] Committed
 
@@ -166,6 +166,34 @@ dict round-trips; 20 records at once from threads all saved; a table/model colum
 **Handoff to include in the answer:** the `db_hook.py` line, plus a table "where Zhi Hong should call
 `record_audit`": gate open/close/repair in `routes/control.py`, repairs and fan/light switching in his automation,
 user create/edit/delete in the admin routes, with the exact call for each.
+
+#### Handoff: audit call sites (Task A → Zhi Hong)
+
+Three helpers in `app/services/audit.py`. None of them ever raises because of the audit itself, and none commits
+or rolls back the caller's own work (they write in a separate short transaction):
+
+| Helper | Use it in |
+| --- | --- |
+| `with audited(db, ACTION, actor=..., target_type=..., target_name=...):` | sync routes with a `db` session: records success, or `success=False` + the error text if the block raises (the error is re-raised unchanged) |
+| `record_audit(db, ACTION, actor=..., ...)` | sync code, one-off events |
+| `await record_audit_async(ACTION, ...)` | async code without a session: `main.py` routes and automation loops |
+
+**Register the router** in `db_hook.py` (top: `from app.api.routes import audit  # noqa: E402`; in `setup()` after the
+existing loop): `app.include_router(audit.router)`  → `GET /api/audit` (Admin only).
+
+| Where | Change (exact) |
+| --- | --- |
+| `app/api/routes/control.py` · `gate_action` | rename the `_: OperatorUser` parameter to `user: OperatorUser`, then wrap the simulator call:<br>`with audited(db, f"GATE_{action.upper()}", actor=user.username, target_type="gate", target_name=name):`<br>`    _simulator_call(...)`  (the existing line, indented) |
+| `app/api/routes/control.py` · `repair_spot` | add `db: DbSession`, rename `_` to `user`, wrap the simulator call in `with audited(db, "SPOT_REPAIR", actor=user.username, target_type="spot", target_name=name):` |
+| `app/api/routes/control.py` · `car_goto` | add `db: DbSession`, rename `_` to `user`, wrap in `with audited(db, "CAR_MOVED", actor=user.username, target_type="car", target_name=plate, details={"destination": destination}):` |
+| `app/api/routes/control.py` · `resync` | rename `_` to `user`, wrap in `with audited(db, "SIMULATOR_RESYNC", actor=user.username, target_type="system"):` |
+| `app/api/routes/auth.py` · `create_user` (and future edit / delete / role change) | rename `_: AdminUser` to `admin: AdminUser`; after `db.commit()`: `record_audit(db, "USER_CREATED", actor=admin.username, target_type="user", target_name=user.username, details={"role": user.role})`. Edit: `"USER_UPDATED"` with `{"old_role": ..., "new_role": ...}`; delete: `"USER_DELETED"`. **Never put passwords in `details`** (keys with password/token/secret are masked anyway). |
+| `main.py` · `/barrier-gates/{name}/repair`, `/parking-spots/{name}/repair`, `/exhaust-fans/{name}/repair` | after the `call_simulator_api(...)` succeeds: `await record_audit_async("GATE_REPAIR" / "SPOT_REPAIR" / "FAN_REPAIR", target_type="gate"/"spot"/"fan", target_name=name)` |
+| `main.py` · `/lights/.../on|off`, `/lights/group/...`, `/exhaust-fans/{name}/on|off` | `await record_audit_async("LIGHT_ON" / "LIGHT_OFF" / "LIGHT_GROUP_ON" / "FAN_ON" / "FAN_OFF", target_type="light"/"fan", target_name=name)` |
+| Automation (preventive maintenance, day/night lights, CO fans) | `await record_audit_async("AUTO_REPAIR" / "AUTO_LIGHTS_OFF" / "AUTO_FAN_ON", target_type=..., target_name=..., details={"reason": "usage 950/1000 cycles"})`, no `actor` (= the system). On a refused command pass `success=False, details={"error": ...}`. |
+
+`main.py`'s own routes have no logged-in user yet, so they record `actor=None`. Once they get RBAC (403), pass
+`actor=user.username` there too.
 
 ---
 

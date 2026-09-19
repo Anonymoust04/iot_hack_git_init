@@ -1,6 +1,8 @@
 """Level 2: audit log of important actions, changes, repairs and system events.
 
     record_audit(db, "GATE_OPEN", actor="op1", target_type="gate", target_name="gateA")
+    with audited(db, "GATE_OPEN", actor="op1", ...): do_it()      success, or failure + error text
+    await record_audit_async("AUTO_REPAIR", target_type="fan", ...)   from async code (main.py)
     list_audit(db, actor=..., action=..., since=..., limit=50)     newest first
 
 record_audit writes in its OWN short transaction (a separate session on the same database), so:
@@ -8,13 +10,17 @@ record_audit writes in its OWN short transaction (a separate session on the same
 - it never raises: an audit failure is logged, and the caller's real action carries on.
 """
 
+import asyncio
 import json
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.db.session import SessionLocal
 from app.models.audit_log import AuditLog
 
 log = logging.getLogger(__name__)
@@ -64,6 +70,29 @@ def record_audit(db: Session, action: str, *, actor: str | None = None, target_t
     except Exception:
         log.exception("Could not write audit log %s %s/%s", action, target_type, target_name)
         return None
+
+
+@contextmanager
+def audited(db: Session, action: str, **fields) -> Iterator[None]:
+    """Audit the wrapped block: success if it finishes, success=False with the error text if it
+    raises (the error is re-raised unchanged). fields = record_audit's keyword arguments."""
+    try:
+        yield
+    except Exception as exc:
+        error = getattr(exc, "detail", None) or str(exc)
+        details = {**(fields.pop("details", None) or {}), "error": str(error)[:500]}
+        record_audit(db, action, success=False, details=details, **fields)
+        raise
+    record_audit(db, action, **fields)
+
+
+async def record_audit_async(action: str, **fields) -> AuditLog | None:
+    """For async code without a session (main.py routes, automation loops): same as record_audit,
+    run in a worker thread with its own session so the event loop never waits on MySQL."""
+    def run():
+        with SessionLocal() as db:
+            return record_audit(db, action, **fields)
+    return await asyncio.to_thread(run)
 
 
 def list_audit(db: Session, *, actor: str | None = None, action: str | None = None,

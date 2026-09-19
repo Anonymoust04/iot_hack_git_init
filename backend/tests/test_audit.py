@@ -138,3 +138,32 @@ def test_api_is_admin_only(api, audit_db):
     assert set(row) == {"id", "actor", "action", "target_type", "target_name", "success", "details",
                         "ip_address", "created_at"}
     assert api.get("/api/audit", headers=api.admin, params={"limit": 501}).status_code == 422
+
+
+def test_audited_records_success_and_failure(audit_db):
+    from fastapi import HTTPException
+
+    from app.services.audit import audited
+
+    with audited(audit_db, "GATE_OPEN", actor="op1", target_type="gate", target_name="gateA"):
+        pass
+    with pytest.raises(HTTPException):                   # the error still reaches the caller
+        with audited(audit_db, "GATE_REPAIR", actor="op1", target_type="gate", target_name="gateB",
+                     details={"requested": "repair"}):
+            raise HTTPException(502, "Simulator refused (400): Gate is not broken")
+    failed, ok = list_audit(audit_db)
+    assert (ok.action, ok.success) == ("GATE_OPEN", True)
+    assert (failed.action, failed.success) == ("GATE_REPAIR", False)
+    assert failed.details == {"requested": "repair", "error": "Simulator refused (400): Gate is not broken"}
+
+
+def test_record_audit_async_from_async_code(audit_db):
+    import asyncio
+
+    from app.services.audit import record_audit_async
+
+    saved = asyncio.run(record_audit_async("AUTO_REPAIR", target_type="fan", target_name="fan2",
+                                           details={"reason": "usage 950/1000 cycles"}))
+    assert saved is not None
+    [row] = list_audit(audit_db)
+    assert (row.actor, row.action, row.details["reason"]) == (None, "AUTO_REPAIR", "usage 950/1000 cycles")
