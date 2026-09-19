@@ -9,6 +9,11 @@ function Navigation() {
       </div>
 
       <div className="navigation-links">
+
+        <NavLink to="/dashboard">
+          DASHBOARD
+        </NavLink>
+
         <NavLink to="/vehicles">
           VEHICLES
         </NavLink>
@@ -16,6 +21,7 @@ function Navigation() {
         <NavLink to="/account">
           ACCOUNT
         </NavLink>
+
       </div>
 
       <div className="navigation-status">

@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import "./App.css";
 
 import Login from "./pages/Login.jsx";
+import Dashboard from "./pages/Dashboard.jsx";
 import Account from "./pages/Account.jsx";
 import VehicleSearch from "./pages/VehicleSearch.jsx";
 import VehicleDetails from "./pages/VehicleDetails.jsx";
@@ -11,8 +12,21 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
+
+        {/* Login */}
         <Route path="/login" element={<Login />} />
 
+        {/* Dashboard */}
+        <Route
+          path="/dashboard"
+          element={
+            <Layout>
+              <Dashboard />
+            </Layout>
+          }
+        />
+
+        {/* Vehicle Search */}
         <Route
           path="/vehicles"
           element={
@@ -22,6 +36,7 @@ function App() {
           }
         />
 
+        {/* Vehicle Details */}
         <Route
           path="/vehicles/:plateNumber"
           element={
@@ -31,6 +46,7 @@ function App() {
           }
         />
 
+        {/* Account */}
         <Route
           path="/account"
           element={
@@ -40,10 +56,12 @@ function App() {
           }
         />
 
+        {/* Unknown URL */}
         <Route
           path="*"
           element={<Navigate to="/login" replace />}
         />
+
       </Routes>
     </BrowserRouter>
   );

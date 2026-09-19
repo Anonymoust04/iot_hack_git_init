@@ -40,7 +40,7 @@ input {
   display: flex;
   align-items: center;
   gap: 12px;
-
+  color: #ffffff;
   font-size: 15px;
   font-weight: 700;
   letter-spacing: 1.5px;
@@ -385,6 +385,7 @@ input {
 
 .no-results h3 {
   margin: 0 0 8px;
+  color: #f2f4f7;
 }
 
 .no-results p {
@@ -1034,4 +1035,37 @@ input {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 1.5px;
+}
+
+/* Keep Account page text visible on dark background */
+
+.account-page h1,
+.account-page h2,
+.account-page h3,
+.account-page strong {
+  color: #f2f4f7;
+}
+
+.profile-info h2 {
+  color: #f2f4f7;
+}
+
+.card-heading h2 {
+  color: #f2f4f7;
+}
+
+.detail-row strong {
+  color: #f2f4f7;
+}
+
+.access-card h2 {
+  color: #f2f4f7;
+}
+
+.results-header h2 {
+  color: #f2f4f7;
+}
+
+.no-results h3 {
+  color: #f2f4f7;
 }
