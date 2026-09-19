@@ -60,7 +60,7 @@ def db(mysql):
 
 @pytest.fixture(scope="session")
 def client(mysql):
-    from app.main import app
+    from main import app
 
     with TestClient(app) as c:  # runs startup: apply schema + seed admin
         yield c

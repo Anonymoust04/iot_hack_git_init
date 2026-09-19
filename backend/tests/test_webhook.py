@@ -1,12 +1,15 @@
-"""Webhook route: signature, dedup, sequence checks, and the car / payment flow end to end."""
+"""POST /webhook (Tee's main.py) -> db_hook.py -> MySQL: signature, dedup, sequence checks,
+and the tables the dashboard reads. Simulator calls are faked, so no real car is moved."""
 
+import time
 import uuid
 
+import db_hook
+import main
 import pytest
 from sqlalchemy import select
 
-from app.api.routes import webhook as webhook_route
-from app.models import Event, Gate, ParkingSession, PaymentStatus, SessionStatus
+from app.models import Event, Gate, ParkingSession, PaymentStatus, SessionStatus, SpotStatus
 from app.services.sync import upsert_parking_spots
 from app.services.webhook_handlers import compute_signature, signature_is_valid
 from tests.test_parking_flow import get_spot, spot
@@ -28,21 +31,25 @@ def test_signature_matches_the_documented_example():
     assert not signature_is_valid(DOC_EXAMPLE)  # no Signature at all
 
 
-# ---- route (real MySQL) -----------------------------------------------------
+# ---- helpers ----------------------------------------------------------------
 
-class FakeSimulator:
-    def __init__(self):
-        self.calls = []
+@pytest.fixture(autouse=True)
+def no_simulator(monkeypatch):
+    """main.py's workers and db_hook's sync must not talk to a real simulator during tests."""
+    async def fake_call(*args, **kwargs):
+        return {}
+    monkeypatch.setattr(main, "call_simulator_api", fake_call)
+    monkeypatch.setattr(db_hook, "_sync_if_empty", lambda: None)
 
-    def __getattr__(self, name):
-        return lambda *args: self.calls.append((name, *args))
 
-
-@pytest.fixture
-def sim(monkeypatch):
-    fake = FakeSimulator()
-    monkeypatch.setattr(webhook_route, "get_simulator", lambda: fake)
-    return fake
+def wait_until(check, timeout=10.0):
+    """Webhooks are stored by db_hook's background worker: wait for it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if check():
+            return
+        time.sleep(0.05)
+    raise AssertionError("condition not reached in time")
 
 
 _seq = iter(range(10_000, 10**9))
@@ -52,82 +59,98 @@ def send(client, event_class, **fields):
     payload = {"EventClass": event_class, "EventId": str(uuid.uuid4()), "SequenceId": next(_seq),
                "ServerDateTime": "2026-09-12 15:40:00", **fields}
     payload["Signature"] = compute_signature({k: str(v) for k, v in payload.items()})
-    return client.post("/webhook", json=payload), payload
+    r = client.post("/webhook", json=payload)
+    assert r.status_code == 200
+    return payload
 
 
-def car_event(client, plate, spot_name, spot_type, direction, car_type="Normal", time="2026-09-12 15:40:00"):
+def car_event(client, plate, spot_name, spot_type, direction, time="2026-09-12 15:40:00"):
     return send(client, "car_spot_action", CarPlateNumber=plate, SpotName=spot_name, SpotType=spot_type,
-                CarType=car_type, Direction=direction, PlannedParkingDurationInMinutes="0",
-                ServerDateTime=time)[0]
+                CarType="Normal", Direction=direction, PlannedParkingDurationInMinutes="2",
+                ServerDateTime=time)
 
 
-def event_types(db, plate):
+def event_types(db, plate=None, event_type=None):
     db.expire_all()
-    return db.scalars(select(Event.event_type).where(Event.car_plate == plate).order_by(Event.id)).all()
+    q = select(Event.event_type).order_by(Event.id)
+    if plate:
+        q = q.where(Event.car_plate == plate)
+    if event_type:
+        q = q.where(Event.event_type == event_type)
+    return db.scalars(q).all()
 
 
-def test_bad_signature_is_stored_but_not_processed(db, client, sim):
-    r = client.post("/webhook", json={"EventClass": "payment_made", "CarPlateNumber": "FAKE 1",
-                                      "Amount": "1.00", "EventId": "x", "SequenceId": 1, "Signature": "0" * 32})
-    assert r.json()["handled"] is False
-    assert event_types(db, "FAKE 1") == ["WEBHOOK_BAD_SIGNATURE"]
+# ---- checks on every webhook --------------------------------------------------
+
+def test_bad_signature_is_stored_but_not_processed(db, client):
+    client.post("/webhook", json={"EventClass": "gate_action", "CarPlateNumber": "FAKE 1", "Name": "gateZ",
+                                  "Action": "Open", "EventId": "x", "SequenceId": 1, "Signature": "0" * 32})
+    wait_until(lambda: event_types(db, "FAKE 1") == ["WEBHOOK_BAD_SIGNATURE"])
+    assert db.scalar(select(Gate).where(Gate.name == "gateZ")) is None
 
 
-def test_duplicate_event_id_is_processed_once(db, client, sim):
-    r, payload = send(client, "gate_action", Name="gate0", Action="Open")
-    assert r.json() == {"ok": True, "handled": True}
-    assert client.post("/webhook", json=payload).json()["duplicate"] is True
+def test_duplicate_event_id_is_stored_once(db, client):
+    payload = send(client, "gate_action", Name="gate0", Action="Open")
+    client.post("/webhook", json=payload)  # same EventId again
+    send(client, "test_webhook")           # stored after both copies (the worker keeps order)
+    wait_until(lambda: event_types(db, event_type="WEBHOOK") == ["WEBHOOK", "WEBHOOK"])
     assert len(db.scalars(select(Event).where(Event.event_id == payload["EventId"])).all()) == 1
 
 
-def test_sequence_gap_is_logged(db, client, sim):
+def test_sequence_gap_is_logged(db, client):
     send(client, "test_webhook")
     next(_seq)  # skip one number
     send(client, "test_webhook")
-    db.expire_all()
-    assert db.scalar(select(Event.event_type).where(Event.event_type == "SEQUENCE_GAP")) == "SEQUENCE_GAP"
+    wait_until(lambda: event_types(db, event_type="SEQUENCE_GAP") == ["SEQUENCE_GAP"])
 
 
-def test_float_values_keep_their_original_text(db, client, sim):
+def test_float_values_keep_their_original_text(db, client):
     # 63.564693 must be signed as written, not as Python re-formats the float
     payload = {"EventClass": "carbon_monoxide_event", "ZoneName": "ZONE1", "CarbonMonoxideLevel": 63.564693,
                "DangerLevel": "Mid", "EventId": str(uuid.uuid4()), "SequenceId": next(_seq),
                "ServerDateTime": "2026-09-12 15:35:21"}
     payload["Signature"] = compute_signature({k: str(v) for k, v in payload.items()})
-    assert client.post("/webhook", json=payload).json()["handled"] is True
+    client.post("/webhook", json=payload)
+    wait_until(lambda: event_types(db, event_type="CO_ALERT") == ["CO_ALERT"])
 
 
-def test_gate_action_updates_gate(db, client, sim):
-    send(client, "gate_action", Name="gate0", Action="Opening")
-    send(client, "component_broken", Type="BarrierGate", Name="gate0", FineAmount="10.00")
-    db.expire_all()
-    gate = db.scalars(select(Gate).where(Gate.name == "gate0")).one()
-    assert (gate.state.value, gate.broken) == ("Opening", True)
+def test_gate_action_updates_gate(db, client):
+    send(client, "gate_action", Name="gateA", Action="Opening")
+    send(client, "component_broken", Type="BarrierGate", Name="gateA", FineAmount="10.00")
+
+    def gate_updated():
+        db.expire_all()
+        gate = db.scalar(select(Gate).where(Gate.name == "gateA"))
+        return gate is not None and (gate.state.value, gate.broken) == ("Opening", True)
+    wait_until(gate_updated)
 
 
-def test_full_car_flow_with_valid_and_fake_payment(db, client, sim):
-    upsert_parking_spots(db, [spot("S153")])
+# ---- a car's visit, as the dashboard sees it -------------------------------------
+
+def test_car_visit_updates_spots_and_history(db, client):
+    upsert_parking_spots(db, [spot("S5")])
     db.commit()
     plate = "WCT 759"
 
-    car_event(client, plate, "ENTRY1", "EntrySpot", "CarIn", time="2026-09-12 15:40:17")
-    assert ("car_goto", plate, "S153") in sim.calls
-    car_event(client, plate, "ENTRY1", "EntrySpot", "CarOut")
-    car_event(client, plate, "S153", "Park", "CarIn")
-    assert get_spot(db, "S153").current_car == plate
-    car_event(client, plate, "S153", "Park", "CarOut")
-    car_event(client, plate, "EXIT", "ExitSpot", "CarIn", time="2026-09-12 15:42:41")
-    # billed on the simulator clock: 15:40:17 -> 15:42:41 = 2m24s -> 3 minutes (rounded up)
-    assert ("charge_car", plate, 3.0, 0.0) in sim.calls
+    car_event(client, plate, "ENTRY1", "EntrySpot", "CarIn")  # main.py's entry worker handles this one
+    car_event(client, plate, "S5", "Park", "CarIn", time="2026-09-12 15:40:21")
+    wait_until(lambda: get_spot(db, "S5").current_car == plate)
+    assert get_spot(db, "S5").status == SpotStatus.OCCUPIED
 
-    send(client, "payment_made", CarPlateNumber=plate, Amount="1.00", Reason="Car Payment")  # wrong amount
-    send(client, "payment_made", CarPlateNumber=plate, Amount="3.00", Reason="Car Payment")
-    send(client, "payment_made", CarPlateNumber=plate, Amount="3.00", Reason="Car Payment")  # second payment
+    car_event(client, plate, "S5", "Park", "CarOut")
+    wait_until(lambda: get_spot(db, "S5").status == SpotStatus.FREE)  # free again for the next car
 
-    car_event(client, plate, "EXIT", "ExitSpot", "CarOut")
+    send(client, "payment_made", CarPlateNumber=plate, Amount="2.00", Reason="Car Payment")
+    car_event(client, plate, "EXIT_EXIT", "ExitSpot", "CarOut")
+    wait_until(lambda: "CAR_DEPARTED" in event_types(db, plate))
+
     db.expire_all()
     session = db.scalars(select(ParkingSession).where(ParkingSession.car_plate == plate)).one()
     assert (session.status, session.payment_status) == (SessionStatus.COMPLETED, PaymentStatus.PAID)
-    handled = [t for t in event_types(db, plate) if t != "WEBHOOK"]
-    assert handled == ["SPOT_ASSIGNED", "CAR_PARKED", "CAR_EXITING", "CAR_CHARGED",
-                       "PAYMENT_REJECTED", "PAYMENT_ACCEPTED", "PAYMENT_REJECTED", "CAR_DEPARTED"]
+    assert [t for t in event_types(db, plate) if t != "WEBHOOK"] == ["CAR_PARKED", "CAR_EXITING", "CAR_DEPARTED"]
+
+
+def test_main_py_still_answers_from_its_own_queues(client):
+    # Tee's route replies right away; the database copy happens in the background
+    r = client.post("/webhook", json={"EventClass": "test_webhook"})
+    assert r.json()["status"] == "queued"

@@ -1,5 +1,8 @@
 """Checks that the app starts, the DB schema works, and auth/roles are enforced."""
 
+import time
+import uuid
+
 from app.services.webhook_handlers import compute_signature
 from tests.conftest import login
 
@@ -39,7 +42,13 @@ def test_dashboard_and_history_on_empty_db(db, client, admin_headers):
 
 
 def test_webhook_stores_unknown_events(client):
-    r = client.post("/webhook", json=signed({"EventClass": "SomethingNew", "EventId": "smoke-unknown-1"}))
-    assert r.json()["handled"] is False  # stored as event_type='WEBHOOK' (or a duplicate on re-run)
-    events = client.get("/api/history/events?event_type=WEBHOOK", headers=login(client, "admin", "admin-pw"))
-    assert events.status_code == 200 and len(events.json()) >= 1
+    headers = login(client, "admin", "admin-pw")
+    url = "/api/history/events?event_type=WEBHOOK&limit=500"
+    before = len(client.get(url, headers=headers).json())
+    r = client.post("/webhook", json=signed({"EventClass": "SomethingNew", "EventId": str(uuid.uuid4())}))
+    assert r.json()["status"] == "queued"
+    for _ in range(100):  # stored as event_type='WEBHOOK' by db_hook's background worker
+        if len(client.get(url, headers=headers).json()) > before:
+            return
+        time.sleep(0.1)
+    raise AssertionError("webhook was not stored")

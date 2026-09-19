@@ -6,6 +6,9 @@ import httpx
 
 app = FastAPI(title="Parking Simulator Backend")
 
+import db_hook  # MySQL: login/roles, dashboard API, webhook history (see db_hook.py)
+db_hook.setup(app)
+
 # Configuration constants
 SIMULATOR_URL = "http://127.0.0.1:9898"
 SIMULATOR_TOKEN = (
@@ -110,6 +113,7 @@ async def startup_event():
 async def webhook(request: Request):
     """Receive incoming events from the Parking Simulator and route to Entrance or Exit queue."""
     data = await request.json()
+    await db_hook.record(request)  # also store it in MySQL (background, never blocks)
     
     # Store raw event log
     webhook_events.append(data)
