@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models import Event, Gate, ParkingSession, PaymentStatus, SessionStatus, SpotStatus
-from app.services.sync import upsert_parking_spots
+from app.services.sync import upsert_gates, upsert_parking_spots
 from app.services.webhook_handlers import compute_signature, signature_is_valid
 from tests.test_parking_flow import get_spot, spot
 
@@ -89,6 +89,14 @@ def test_bad_signature_is_stored_but_not_processed(db, client):
     assert db.scalar(select(Gate).where(Gate.name == "gateZ")) is None
 
 
+def test_unsigned_webhook_from_the_simulator_is_processed(db, client):
+    # the real simulator sends "Signature": null
+    client.post("/webhook", json={"EventClass": "gate_action", "Name": "gateU", "Action": "Open",
+                                  "EventId": str(uuid.uuid4()), "SequenceId": next(_seq), "Signature": None})
+    wait_until(lambda: db.scalar(select(Gate).where(Gate.name == "gateU")) is not None)
+    assert event_types(db, event_type="WEBHOOK_BAD_SIGNATURE") == []
+
+
 def test_duplicate_event_id_is_stored_once(db, client):
     payload = send(client, "gate_action", Name="gate0", Action="Open")
     client.post("/webhook", json=payload)  # same EventId again
@@ -127,12 +135,24 @@ def test_gate_action_updates_gate(db, client):
 
 # ---- a car's visit, as the dashboard sees it -------------------------------------
 
-def test_car_visit_updates_spots_and_history(db, client):
+def test_car_visit_updates_spots_and_history(db, client, admin_headers):
     upsert_parking_spots(db, [spot("S5")])
+    upsert_gates(db, [{"name": "gateA", "zoneParent": "ZONE1", "state": "Closed"},
+                      {"name": "gateB", "zoneParent": "ZONE1", "state": "Closed"},
+                      {"name": "gateC", "zoneParent": "", "state": "Open"}])
     db.commit()
     plate = "WCT 759"
 
-    car_event(client, plate, "ENTRY1", "EntrySpot", "CarIn")  # main.py's entry worker handles this one
+    car_event(client, plate, "ENTRY1", "EntrySpot", "CarIn", time="2026-09-12 15:40:17")  # + main.py's entry worker
+    wait_until(lambda: "CAR_ARRIVED" in event_types(db, plate))
+    dash = client.get("/api/dashboard", headers=admin_headers).json()
+    assert dash["cars_inside"] == 0  # still queuing at the entrance
+    car_event(client, plate, "ENTRY1", "EntrySpot", "CarOut")   # drove through the gate
+    wait_until(lambda: "CAR_ENTERED" in event_types(db, plate))
+    dash = client.get("/api/dashboard", headers=admin_headers).json()
+    assert dash["cars_inside"] == 1
+    assert {g["name"]: g["role"] for g in dash["gates"]} == {"gateA": "entrance", "gateB": "exit", "gateC": None}
+
     car_event(client, plate, "S5", "Park", "CarIn", time="2026-09-12 15:40:21")
     wait_until(lambda: get_spot(db, "S5").current_car == plate)
     assert get_spot(db, "S5").status == SpotStatus.OCCUPIED
@@ -141,13 +161,29 @@ def test_car_visit_updates_spots_and_history(db, client):
     wait_until(lambda: get_spot(db, "S5").status == SpotStatus.FREE)  # free again for the next car
 
     send(client, "payment_made", CarPlateNumber=plate, Amount="2.00", Reason="Car Payment")
-    car_event(client, plate, "EXIT_EXIT", "ExitSpot", "CarOut")
+    car_event(client, plate, "EXIT_EXIT", "ExitSpot", "CarOut", time="2026-09-12 15:42:41")
     wait_until(lambda: "CAR_DEPARTED" in event_types(db, plate))
 
     db.expire_all()
     session = db.scalars(select(ParkingSession).where(ParkingSession.car_plate == plate)).one()
     assert (session.status, session.payment_status) == (SessionStatus.COMPLETED, PaymentStatus.PAID)
-    assert [t for t in event_types(db, plate) if t != "WEBHOOK"] == ["CAR_PARKED", "CAR_EXITING", "CAR_DEPARTED"]
+    # entry = arrival at the entrance, exit = left the park, both on the simulator clock
+    assert (str(session.entry_time), str(session.exit_time)) == ("2026-09-12 15:40:17", "2026-09-12 15:42:41")
+    assert [t for t in event_types(db, plate) if t != "WEBHOOK"] == [
+        "CAR_ARRIVED", "CAR_ENTERED", "CAR_PARKED", "CAR_EXITING", "CAR_DEPARTED"]
+    assert client.get("/api/dashboard", headers=admin_headers).json()["cars_inside"] == 0
+
+    # the dashboard's activity feed asks for several event types in one call
+    feed = client.get("/api/history/events", headers=admin_headers,
+                      params={"plate": plate, "event_type": ["CAR_ARRIVED", "CAR_DEPARTED"]}).json()
+    assert [e["event_type"] for e in feed] == ["CAR_DEPARTED", "CAR_ARRIVED"]
+
+
+def test_car_sent_away_when_full_is_not_counted_inside(db, client, admin_headers):
+    car_event(client, "AWAY 1", "ENTRY1", "EntrySpot", "CarIn")
+    car_event(client, "AWAY 1", "ESCAPE1", "LeaveParking", "CarIn")
+    wait_until(lambda: "CAR_DEPARTED" in event_types(db, "AWAY 1"))
+    assert client.get("/api/dashboard", headers=admin_headers).json()["cars_inside"] == 0
 
 
 def test_main_py_still_answers_from_its_own_queues(client):

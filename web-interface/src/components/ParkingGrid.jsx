@@ -12,14 +12,14 @@ function ParkingGrid({ initialSpots = [], onRefresh }) {
     initialSpots.length > 0
       ? initialSpots
       : Array.from({ length: 30 }, (_, index) => {
-          const num = index + 1;
-          return {
-            name: `S${num}`,
-            number: num,
-            status: 'free',
-            zone: 'Zone 1',
-          };
-        });
+        const num = index + 1;
+        return {
+          name: `S${num}`,
+          number: num,
+          status: 'free',
+          zone: 'Zone 1',
+        };
+      });
 
   const handleSpotClick = (spot) => {
     setSelectedSpot(spot);
@@ -117,14 +117,14 @@ function ParkingGrid({ initialSpots = [], onRefresh }) {
                   selectedSpot.status === 'free'
                     ? '#dcfce7'
                     : selectedSpot.status === 'occupied'
-                    ? '#fee2e2'
-                    : '#fef3c7',
+                      ? '#fee2e2'
+                      : '#fef3c7',
                 color:
                   selectedSpot.status === 'free'
                     ? '#166534'
                     : selectedSpot.status === 'occupied'
-                    ? '#991b1b'
-                    : '#92400e',
+                      ? '#991b1b'
+                      : '#92400e',
               }}
             >
               {selectedSpot.status}

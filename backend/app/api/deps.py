@@ -10,7 +10,11 @@ from app.core.security import decode_access_token
 from app.db.session import get_db
 from app.models import Role, User
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="api/auth/login",
+    description="Dashboard account from BOOTSTRAP_ADMIN_USERNAME / BOOTSTRAP_ADMIN_PASSWORD. "
+    "Enter these in Swagger's username and password fields; simulator tokens are separate.",
+)
 
 DbSession = Annotated[Session, Depends(get_db)]
 
