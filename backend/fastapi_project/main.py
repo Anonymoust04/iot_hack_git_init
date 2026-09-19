@@ -1,3 +1,4 @@
+from pydantic import BaseModel
 import asyncio
 import random
 from datetime import datetime
@@ -11,9 +12,59 @@ db_hook.setup(app)
 
 # Configuration constants
 SIMULATOR_URL = "http://127.0.0.1:9898"
-SIMULATOR_TOKEN = (
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy93cy8yMDA1LzA1L2lkZW50aXR5L2NsYWltcy9lbWFpbGFkZHJlc3MiOiJhZG1pbiIsImV4cCI6MTc5MDA2NzE2OSwiaXNzIjoiUGFya2luZ1NpbXVsYXRvciJ9.HWPvveO2byDCp8KJKyuxOxNosLq35-LfmyXr7-ia70k"
-)
+SIMULATOR_EMAIL = "admin"
+SIMULATOR_PASSWORD = "admin"
+
+SIMULATOR_TOKEN: str | None = None
+_token_lock = asyncio.Lock()
+
+class LoginRequest(BaseModel):
+    email: str = "admin"
+    password: str = "admin"
+
+
+@app.post("/auth/login")
+async def test_login(body: LoginRequest):
+    """Test the simulator login with arbitrary credentials."""
+    token = await api_login(body.email, body.password)
+    return {
+        "status": "ok",
+        "email": body.email,
+        "token_preview": f"{token[:25]}...",
+        "token_length": len(token),
+    }
+
+async def api_login(email: str | None = None, password: str | None = None) -> str:
+    """POST /api/v1/auth/login -> {"token": "..."} and cache it."""
+    global SIMULATOR_TOKEN
+    email = email or SIMULATOR_EMAIL
+    password = password or SIMULATOR_PASSWORD
+
+    url = f"{SIMULATOR_URL}/api/v1/auth/login"
+    payload = {"email": email, "password": password}
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(url, json=payload)
+
+    if not resp.is_success:
+        raise HTTPException(resp.status_code, f"Login failed: {resp.text}")
+
+    token = resp.json().get("token")
+    if not token:
+        raise HTTPException(502, "Login response had no token")
+
+    SIMULATOR_TOKEN = token
+    print(f"[AUTH] Logged in as {email}, token cached ({token[:20]}...)")
+    return token
+
+async def get_token(force: bool = False) -> str:
+    """Return a cached token, logging in only when missing or forced."""
+    global SIMULATOR_TOKEN
+    async with _token_lock:
+        if force or not SIMULATOR_TOKEN:
+            await api_login()
+        return SIMULATOR_TOKEN
+
 
 # Valid parking spot range: S1 to S30
 VALID_PARKING_SPOTS = [f"S{i}" for i in range(1, 31)]
