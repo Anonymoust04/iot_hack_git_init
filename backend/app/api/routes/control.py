@@ -5,8 +5,8 @@ from typing import Literal
 from fastapi import APIRouter, status
 
 from app.api.deps import AdminUser, DbSession, OperatorUser
-from app.services.parking import sync_from_simulator
 from app.services.simulator_client import get_simulator
+from app.services.sync import sync_from_simulator
 
 router = APIRouter(prefix="/api/control", tags=["control"])
 
@@ -34,8 +34,7 @@ def repair_spot(name: str, _: OperatorUser):
 @router.post("/sync")
 def resync(db: DbSession, _: AdminUser):
     """Full resync from simulator. Costly — use only after a crash / level load."""
-    sync_from_simulator(db, get_simulator())
-    return {"ok": True}
+    return sync_from_simulator(db, get_simulator())
 
 
 @router.post("/test-webhook")

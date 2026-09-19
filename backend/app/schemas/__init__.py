@@ -35,11 +35,11 @@ class UserOut(ORMModel):
 
 class SpotOut(ORMModel):
     name: str
+    zone: str
     purpose: str
     car_type: str
-    zone: str
-    occupied_by: str | None
-    reserved_for: str | None
+    status: str          # FREE | RESERVED | OCCUPIED | BROKEN | MAINTENANCE
+    current_car: str | None
     broken: bool
     under_maintenance: bool
 
@@ -55,9 +55,10 @@ class GateOut(ORMModel):
 class ZoneSummary(BaseModel):
     zone: str
     total: int
-    occupied: int
     free: int
-    unavailable: int  # broken / under maintenance
+    reserved: int
+    occupied: int
+    unavailable: int  # BROKEN / MAINTENANCE
 
 
 class DashboardOut(BaseModel):
@@ -71,13 +72,22 @@ class DashboardOut(BaseModel):
 
 class ParkingSessionOut(ORMModel):
     id: int
-    plate: str
-    is_electric: bool
-    spot_name: str | None
+    car_plate: str
+    car_type: str | None
+    spot_name: str | None = None  # filled from the joined parking_spots row
     status: str
-    arrived_at: datetime
-    parked_at: datetime | None
-    exited_at: datetime | None
-    minutes: int | None
+    payment_status: str
+    entry_time: datetime
+    parked_time: datetime | None
+    exit_time: datetime | None
     parking_cost: float | None
     charging_cost: float | None
+
+
+class EventOut(ORMModel):
+    id: int
+    event_type: str
+    car_plate: str | None
+    parking_spot: str | None
+    gate_name: str | None
+    event_time: datetime
