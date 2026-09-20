@@ -161,6 +161,24 @@ entry_occupied: dict[str, bool] = {
     "ENTRY3": False,
 }
 
+# Timestamp (time.time()) of when each EntrySpot last became occupied.
+# Used by the watchdog to detect cars stuck at the entry for too long.
+entry_occupied_since: dict[str, float] = {
+    "ENTRY1": 0.0,
+    "ENTRY2": 0.0,
+    "ENTRY3": 0.0,
+}
+
+# Tracks which car plate is currently at each EntrySpot (for watchdog nudging).
+entry_car: dict[str, str | None] = {
+    "ENTRY1": None,
+    "ENTRY2": None,
+    "ENTRY3": None,
+}
+
+# Seconds a car may stay at an EntrySpot before the watchdog force-releases it.
+ENTRY_SPOT_TIMEOUT_SECONDS: float = 20.0
+
 # Per-EntrySpot FIFO queue for cars waiting while the spot is occupied.
 entry_queues: dict[str, asyncio.Queue] = {
     "ENTRY1": asyncio.Queue(),
@@ -293,14 +311,38 @@ async def send_car_to_entry_or_queue(car_plate: str, entry_name: str, assigned_s
         + (f" for {assigned_spot}" if assigned_spot else "")
     )
     entry_occupied[entry_name] = True
+    entry_occupied_since[entry_name] = time.time()   # watchdog timestamp
+    entry_car[entry_name] = car_plate                 # watchdog nudge tracking
 
     try:
         result = await api_send_car_to_destination(car_plate, entry_name)
         return result if isinstance(result, dict) else {"status": "success", "result": result}
+    except HTTPException as exc:
+        detail_str = str(getattr(exc, "detail", "") or "").lower()
+        if "occupied" in detail_str or exc.status_code in (409, 422):
+            # The EntrySpot is PHYSICALLY occupied by another car.
+            # Keep our lock (entry_occupied stays True) and re-queue this car
+            # so it is retried as soon as the spot clears.
+            print(
+                f"[ENTRY ROUTE] Simulator says {entry_name} occupied "
+                f"-> requeueing {car_plate}."
+            )
+            entry_occupied_since[entry_name] = time.time()  # reset watchdog timer
+            await entry_queues[entry_name].put(
+                {"car_plate": car_plate, "assigned_spot": assigned_spot}
+            )
+            return {"status": "requeued", "entry": entry_name}
+        else:
+            # Some other API error — release the lock so the spot doesn't freeze.
+            entry_occupied[entry_name] = False
+            entry_occupied_since[entry_name] = 0.0
+            entry_car[entry_name] = None
+            raise
     except Exception:
-        # Do not permanently lock the EntrySpot if the simulator rejected the
-        # goto request or the request failed before the car arrived.
+        # Network / unexpected error — release the lock.
         entry_occupied[entry_name] = False
+        entry_occupied_since[entry_name] = 0.0
+        entry_car[entry_name] = None
         raise
 
 
@@ -643,6 +685,7 @@ async def process_car_entry(data: dict):
     except Exception:
         pass
 
+
     recent_car_arrivals.append({
         "car_plate": car_plate, "car_type": car_type, "spot_name": spot_name,
         "parking_duration": planned_dur, "event_time": server_time, "raw_event": data,
@@ -747,7 +790,8 @@ async def process_car_entry(data: dict):
 
                 # Do NOT blindly send the car to ENTRY2/ENTRY3. The simulator
                 # rejects the request when another car is already occupying
-                # that EntrySpot. Queue it until the EntrySpot reports CarOut.
+                # that EntrySpot. Use send_car_to_entry_or_queue so the
+                # occupancy guard and FIFO queue handle the collision safely.
                 await send_car_to_entry_or_queue(
                     car_plate, target_entry, assigned_spot
                 )
@@ -845,6 +889,59 @@ async def process_car_exit(data: dict):
 
 
 # -------------------------------------------------
+# ENTRY SPOT WATCHDOG
+# -------------------------------------------------
+
+async def entry_spot_watchdog_worker():
+    """
+    Polls every 5 seconds.  If any EntrySpot has been occupied for longer than
+    ENTRY_SPOT_TIMEOUT_SECONDS:
+      1. Try to nudge the stuck car toward its assigned parking spot via the
+         gate queue so it stops blocking the entry.
+      2. Force-release the entry_occupied flag.
+      3. Drain the per-entry queue so the next waiting car can proceed.
+    """
+    print("[ENTRY WATCHDOG] Entry spot watchdog started.")
+    while True:
+        await asyncio.sleep(5.0)
+        now = time.time()
+        for entry_name, occupied in list(entry_occupied.items()):
+            if not occupied:
+                continue
+            elapsed = now - entry_occupied_since.get(entry_name, now)
+            if elapsed < ENTRY_SPOT_TIMEOUT_SECONDS:
+                continue
+
+            print(
+                f"[ENTRY WATCHDOG] {entry_name} occupied for {elapsed:.0f}s "
+                f"(>{ENTRY_SPOT_TIMEOUT_SECONDS}s) — nudging & force-releasing."
+            )
+
+            # Try to nudge the stuck car toward its parking spot.
+            stuck_plate = entry_car.get(entry_name)
+            if stuck_plate:
+                car_info    = active_cars.get(stuck_plate, {})
+                stuck_spot  = car_info.get("assigned_spot")
+                if stuck_spot and not car_info.get("parked", False):
+                    target_gate = spot_gate(stuck_spot)
+                    print(
+                        f"[ENTRY WATCHDOG] Nudging {stuck_plate} "
+                        f"-> {target_gate} for {stuck_spot}."
+                    )
+                    await gate_queues[target_gate].put({
+                        "car_plate":   stuck_plate,
+                        "gate_name":   target_gate,
+                        "destination": stuck_spot,
+                    })
+
+            # Force-release so queued cars can proceed.
+            entry_occupied[entry_name] = False
+            entry_occupied_since[entry_name] = 0.0
+            entry_car[entry_name] = None
+            asyncio.create_task(process_waiting_entry(entry_name))
+
+
+# -------------------------------------------------
 # STARTUP
 # -------------------------------------------------
 
@@ -857,6 +954,7 @@ async def startup_event():
     asyncio.create_task(auto_preemptive_maintenance_worker())
     asyncio.create_task(auto_light_controller_worker())
     asyncio.create_task(usage_cycle_tracker_worker())
+    asyncio.create_task(entry_spot_watchdog_worker())
     print("[STARTUP] Closing all 6 gates...")
     try:
         await asyncio.gather(*[
@@ -971,11 +1069,15 @@ async def webhook(request: Request):
         if entry_name in entry_occupied:
             if direction == "CarIn":
                 entry_occupied[entry_name] = True
+                entry_occupied_since[entry_name] = time.time()  # sync watchdog timer
+                entry_car[entry_name] = car_plate
                 print(
                     f"[ENTRY SENSOR] {entry_name} OCCUPIED by {car_plate}."
                 )
             elif direction == "CarOut":
                 entry_occupied[entry_name] = False
+                entry_occupied_since[entry_name] = 0.0
+                entry_car[entry_name] = None
                 print(
                     f"[ENTRY SENSOR] {entry_name} FREE."
                 )
