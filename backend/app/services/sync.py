@@ -13,11 +13,11 @@ foreign keys stay valid. Rows are never deleted.
 
 import logging
 
-from sqlalchemy import case, select
+from sqlalchemy import case, select, update
 from sqlalchemy.dialects.mysql import insert
 from sqlalchemy.orm import Session
 
-from app.models import Event, Gate, ParkingSpot, SpotPurpose, SpotStatus
+from app.models import Event, Gate, ParkingSession, ParkingSpot, SessionStatus, SpotPurpose, SpotStatus
 from app.services.simulator_client import SimulatorClient
 
 log = logging.getLogger(__name__)
@@ -118,12 +118,35 @@ def has_spots(db: Session) -> bool:
     return db.scalar(select(ParkingSpot.id).where(ParkingSpot.purpose == SpotPurpose.PARK).limit(1)) is not None
 
 
+def backfill_plates(db: Session) -> None:
+    """The simulator reports only a car count per spot, so a re-sync can leave an occupied spot
+    without a plate (e.g. it briefly reported the spot empty). Take the plate from the car's open
+    visit, so the dashboard keeps showing who is parked where."""
+    plate_of_open_visit = (
+        select(ParkingSession.car_plate)
+        .where(ParkingSession.parking_spot_id == ParkingSpot.id,
+               ParkingSession.status.in_([SessionStatus.PARKED, SessionStatus.EXITING]))
+        .order_by(ParkingSession.id.desc())
+        .limit(1)
+        .correlate(ParkingSpot)
+        .scalar_subquery()
+    )
+    db.execute(
+        update(ParkingSpot)
+        .where(ParkingSpot.status == SpotStatus.OCCUPIED,
+               ParkingSpot.current_car.is_(None),
+               plate_of_open_visit.is_not(None))
+        .values(current_car=plate_of_open_visit)
+    )
+
+
 def sync_from_simulator(db: Session, sim: SimulatorClient, log_event: bool = True) -> dict:
     """Fetch spots + gates from the simulator and upsert them in ONE transaction.
     log_event=False for the periodic re-sync, so the event log isn't flooded."""
     spots = sim.list_parking_spots()
     gates = sim.list_barriers()
     counts = {"spots": upsert_parking_spots(db, spots), "gates": upsert_gates(db, gates)}
+    backfill_plates(db)
     if log_event:
         db.add(Event(event_type="SYNC", raw_data={"spots": spots, "gates": gates}))
     db.commit()

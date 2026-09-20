@@ -178,3 +178,25 @@ def test_wrong_spot_frees_the_reserved_one(db):
     parking.mark_parked(db, "CAR1", "S2")  # driver ignored us
     assert get_spot(db, "S1").status == SpotStatus.FREE
     assert get_spot(db, "S2").current_car == "CAR1"
+
+
+def test_sync_restores_the_plate_of_a_car_that_is_still_parked(db):
+    """The simulator sends only a car count, so a re-sync can drop the plate: put it back from the visit."""
+    from app.services.sync import backfill_plates
+
+    upsert_parking_spots(db, [spot("S1")])
+    db.commit()
+    parking.mark_parked(db, "PLATE 1", "S1")
+    get_spot(db, "S1").current_car = None          # what a re-sync leaves behind
+    db.commit()
+
+    backfill_plates(db)
+    db.commit()
+    assert get_spot(db, "S1").current_car == "PLATE 1"
+
+    parking.complete_departure(db, "PLATE 1")      # car gone: nothing to restore
+    upsert_parking_spots(db, [spot("S1", cars=1)])
+    db.commit()
+    backfill_plates(db)
+    db.commit()
+    assert get_spot(db, "S1").current_car is None

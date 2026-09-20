@@ -115,3 +115,23 @@ def test_activity_feed_and_vehicle_search(park, client, admin_headers):
     assert (sessions[0]["spot_name"], sessions[0]["status"]) == ("S1", "PARKED")
     park.expire_all()
     assert park.scalar(select(ParkingSession.status)) == SessionStatus.PARKED
+
+
+def test_cars_inside_ignores_visits_whose_departure_was_missed(park, client, admin_headers):
+    """A car whose exit webhook never arrived must not keep inflating "Cars Inside"."""
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    from app.models import ParkingSession, utcnow
+    from app.services import parking
+
+    parking.record_arrival(park, "FRESH 1")
+    parking.mark_parked(park, "FRESH 1", "S1")
+    parking.record_arrival(park, "GHOST 1")
+    parking.mark_parked(park, "GHOST 1", "S2")
+    park.execute(update(ParkingSession).where(ParkingSession.car_plate == "GHOST 1")
+                 .values(updated_at=utcnow() - timedelta(minutes=30)))     # silent for 30 minutes
+    park.commit()
+
+    assert client.get("/api/dashboard", headers=admin_headers).json()["cars_inside"] == 1

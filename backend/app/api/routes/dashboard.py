@@ -1,11 +1,13 @@
 """Read-only park status for the dashboard (served from MySQL, never from the simulator)."""
 
+from datetime import timedelta
+
 from fastapi import APIRouter
 from sqlalchemy import and_, exists, func, not_, select
 
 from app.api.deps import CurrentUser, DbSession
 from app.config import get_settings
-from app.models import Event, Gate, ParkingSession, ParkingSpot, SessionStatus, SpotPurpose, SpotStatus
+from app.models import Event, Gate, ParkingSession, ParkingSpot, SessionStatus, SpotPurpose, SpotStatus, utcnow
 from app.schemas import DashboardOut, GateOut, SpotOut, ZoneSummary
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
@@ -49,9 +51,12 @@ def summary(db: DbSession, _: CurrentUser):
         Event.event_time >= ParkingSession.created_at,
     )
     queuing = and_(ParkingSession.status == SessionStatus.ENTERING, not_(entered))
+    # A visit whose departure webhook was missed stays open until the stale-visit cleanup runs, which
+    # would inflate this count: only count visits that are still moving (event in the last 10 minutes).
+    recently_active = ParkingSession.updated_at >= utcnow() - timedelta(minutes=10)
     cars_inside = db.scalar(
         select(func.count()).select_from(ParkingSession)
-        .where(ParkingSession.status != SessionStatus.COMPLETED, not_(queuing))
+        .where(ParkingSession.status != SessionStatus.COMPLETED, not_(queuing), recently_active)
     )
     return DashboardOut(
         zones=zone_list,

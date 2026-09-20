@@ -89,7 +89,7 @@ def test_daily_summary_counts_boundary_and_penalty_total(db, logs_client, admin_
         "date": DAY, "cars_arrived": 3, "cars_parked": 1, "cars_departed": 1,
         "penalties": 2, "penalty_total": Decimal("12.50"),
         "components_broken": 1, "components_fixed": 1, "co_alerts": 1,
-        "busiest_hour": 8,
+        "busiest_hour": 8, "peak_occupancy": 0,
         "events_by_type": {
             "CAR_ARRIVED": 3, "CAR_DEPARTED": 1, "CAR_PARKED": 1,
             "CO_ALERT": 1, "COMPONENT_BROKEN": 1, "COMPONENT_FIXED": 1,
@@ -108,7 +108,7 @@ def test_empty_day_and_busiest_hour_tie(db):
     assert empty == {
         "date": DAY, "cars_arrived": 0, "cars_parked": 0, "cars_departed": 0,
         "penalties": 0, "penalty_total": Decimal("0"), "components_broken": 0,
-        "components_fixed": 0, "co_alerts": 0, "busiest_hour": None,
+        "components_fixed": 0, "co_alerts": 0, "busiest_hour": None, "peak_occupancy": 0,
         "events_by_type": {},
     }
     add_event(db, "CAR_ARRIVED", START + timedelta(hours=7))
