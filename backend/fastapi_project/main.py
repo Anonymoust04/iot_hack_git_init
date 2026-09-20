@@ -814,6 +814,30 @@ async def process_car_entry(data: dict):
 # BUSINESS LOGIC - CAR EXIT
 # -------------------------------------------------
 
+async def _precharge_car_on_departure(car_plate: str, spot_name: str):
+    """
+    Pre-charge a car as soon as it leaves its parking spot (Park CarOut).
+    By the time the car reaches the ExitSpot, payment is already confirmed
+    and the gate opens without any extra delay.
+    """
+    car_info  = active_cars.get(car_plate, {})
+    raw_type  = car_info.get("car_type", "Normal")
+    norm_type = normalize_vehicle_type(raw_type)
+    is_ev     = (norm_type == "Electric")
+    duration  = float(car_info.get("planned_duration", 1) or 1)
+    parking_cost  = float(max(1, round(duration)))
+    charging_cost = float(parking_cost * 2.0) if is_ev else 0.0
+    print(f"[PRE-CHARGE] {car_plate} departed {spot_name}: parking=${parking_cost}, EV=${charging_cost}")
+    try:
+        await api_charge_car(car_plate, parking_cost, charging_cost)
+        charged_cars.add(car_plate)
+        if car_plate in active_cars:
+            active_cars[car_plate]["charged"] = True
+        print(f"[PRE-CHARGE] {car_plate} charged successfully.")
+    except Exception as e:
+        print(f"[PRE-CHARGE] {car_plate} charge failed (will retry at exit): {e}")
+
+
 async def process_car_exit(data: dict):
     global _last_sim_hour
     car_plate   = data.get("CarPlateNumber","") or data.get("CarPlate") or data.get("car_plate") or ""
@@ -863,15 +887,21 @@ async def process_car_exit(data: dict):
         parking_cost  = float(max(1, round(duration)))
         charging_cost = float(parking_cost * 2.0) if is_ev else 0.0
         print(f"[EXIT] Charging {car_plate}: parking=${parking_cost}, EV=${charging_cost}")
-        try:
-            await api_charge_car(car_plate, parking_cost, charging_cost)
-            charged_cars.add(car_plate)
-            if car_plate in active_cars:
-                active_cars[car_plate]["charged"] = True
-            payment_ok = True
-            print(f"[EXIT] Payment confirmed for {car_plate}.")
-        except Exception as e:
-            print(f"[EXIT ERROR] Charge failed for {car_plate}: {e}")
+        # Retry up to 3 times with a short gap so transient API errors don't
+        # permanently block the gate.
+        for attempt in range(1, 4):
+            try:
+                await api_charge_car(car_plate, parking_cost, charging_cost)
+                charged_cars.add(car_plate)
+                if car_plate in active_cars:
+                    active_cars[car_plate]["charged"] = True
+                payment_ok = True
+                print(f"[EXIT] Payment confirmed for {car_plate} (attempt {attempt}).")
+                break
+            except Exception as e:
+                print(f"[EXIT] Charge attempt {attempt}/3 failed for {car_plate}: {e}")
+                if attempt < 3:
+                    await asyncio.sleep(1.0)
     else:
         print(f"[EXIT] {car_plate} already charged.")
 
@@ -885,12 +915,39 @@ async def process_car_exit(data: dict):
         print(f"[EXIT] Queuing {car_plate} for exit via {exit_gate}.")
         await gate_queues[exit_gate].put({"car_plate": car_plate, "gate_name": exit_gate})
     else:
-        print(f"[EXIT] Payment NOT confirmed for {car_plate} - gate stays CLOSED.")
+        # All charge attempts failed.  Rescue the car so it isn't trapped at
+        # the ExitSpot forever (simulator: 'No valid escape spot found').
+        print(f"[EXIT] All charge attempts failed for {car_plate} — rescuing.")
+        freed = car_info.get("assigned_spot") or car_info.get("parked_spot")
+        if freed and freed in parking_spots:
+            parking_spots[freed] = True
+        if car_plate in active_cars:
+            active_cars[car_plate]["assigned_spot"] = None
+        asyncio.create_task(rescue_stuck_car(car_plate, "charge failed after 3 attempts"))
 
 
 # -------------------------------------------------
 # ENTRY SPOT WATCHDOG
 # -------------------------------------------------
+
+async def rescue_stuck_car(car_plate: str, reason: str):
+    """
+    Last-resort escape: find any operable exit gate and route `car_plate`
+    through it to leavepark.  Used when a car is stuck with no valid
+    parking destination (e.g. park is full, all spots broken).
+    """
+    print(f"[RESCUE] {car_plate} - {reason}. Looking for an exit gate...")
+    for g in EXIT_GATES:
+        if await is_component_operable(g):
+            print(f"[RESCUE] {car_plate} -> leavepark via {g}.")
+            await gate_queues[g].put({"car_plate": car_plate, "gate_name": g})
+            return
+    # All exit gates inoperable — try direct goto as absolute fallback.
+    print(f"[RESCUE] All exit gates blocked for {car_plate} -> direct leavepark.")
+    try:
+        await api_send_car_to_destination(car_plate, "leavepark")
+    except Exception as exc:
+        print(f"[RESCUE ERROR] {car_plate}: {exc}")
 
 async def entry_spot_watchdog_worker():
     """
@@ -918,11 +975,15 @@ async def entry_spot_watchdog_worker():
             )
 
             # Try to nudge the stuck car toward its parking spot.
+            # If no valid spot exists, rescue it out through an exit gate.
             stuck_plate = entry_car.get(entry_name)
             if stuck_plate:
-                car_info    = active_cars.get(stuck_plate, {})
-                stuck_spot  = car_info.get("assigned_spot")
-                if stuck_spot and not car_info.get("parked", False):
+                car_info   = active_cars.get(stuck_plate, {})
+                stuck_spot = car_info.get("assigned_spot")
+                already_parked = car_info.get("parked", False)
+
+                if stuck_spot and not already_parked and spot_gate(stuck_spot) in ENTRANCE_GATES:
+                    # Car has a valid unparked destination — nudge through the gate.
                     target_gate = spot_gate(stuck_spot)
                     print(
                         f"[ENTRY WATCHDOG] Nudging {stuck_plate} "
@@ -933,6 +994,20 @@ async def entry_spot_watchdog_worker():
                         "gate_name":   target_gate,
                         "destination": stuck_spot,
                     })
+                else:
+                    # No valid spot (full park, spot cleared, or already parked).
+                    # Send the car out so it doesn't block the entry indefinitely.
+                    asyncio.create_task(
+                        rescue_stuck_car(
+                            stuck_plate,
+                            f"stuck at {entry_name} with no valid destination"
+                        )
+                    )
+                    # Free any reserved spot so the pool is correct.
+                    if stuck_spot and stuck_spot in parking_spots:
+                        parking_spots[stuck_spot] = True
+                    if stuck_plate in active_cars:
+                        active_cars[stuck_plate]["assigned_spot"] = None
 
             # Force-release so queued cars can proceed.
             entry_occupied[entry_name] = False
@@ -1060,6 +1135,10 @@ async def webhook(request: Request):
                 if info.get("assigned_spot") == spot_name:
                     info["assigned_spot"] = None
             print(f"[SENSOR] {spot_name} FREE.")
+            # Pre-charge the car as soon as it leaves the parking spot so the
+            # payment is already confirmed by the time it reaches the exit gate.
+            if car_plate and car_plate not in charged_cars:
+                asyncio.create_task(_precharge_car_on_departure(car_plate, spot_name))
 
     # -------------------------------------------------
     # ENTRANCE SPOT OCCUPANCY / WAITING QUEUES
