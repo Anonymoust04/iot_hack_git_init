@@ -148,6 +148,24 @@ entry_occupied: dict[str, bool] = {
     "ENTRY3": False,
 }
 
+# Timestamp (time.time()) of when each EntrySpot last became occupied.
+# Used by the watchdog to detect cars stuck at the entry for too long.
+entry_occupied_since: dict[str, float] = {
+    "ENTRY1": 0.0,
+    "ENTRY2": 0.0,
+    "ENTRY3": 0.0,
+}
+
+# Tracks which car plate is currently at each EntrySpot (for watchdog nudging).
+entry_car: dict[str, str | None] = {
+    "ENTRY1": None,
+    "ENTRY2": None,
+    "ENTRY3": None,
+}
+
+# Seconds a car may stay at an EntrySpot before the watchdog force-releases it.
+ENTRY_SPOT_TIMEOUT_SECONDS: float = 20.0
+
 # Per-EntrySpot FIFO queue for cars waiting while the spot is occupied.
 entry_queues: dict[str, asyncio.Queue] = {
     "ENTRY1": asyncio.Queue(),
@@ -272,23 +290,51 @@ async def send_car_to_entry_or_queue(car_plate: str, entry_name: str, assigned_s
     if entry_name not in entry_occupied:
         entry_name = "ENTRY1"
 
-    async with entry_lock:
-        queue = entry_queues[entry_name]
-        if entry_occupied[entry_name]:
-            pending = list(getattr(queue, "_queue", []))
-            if any(item.get("car_plate") == car_plate for item in pending):
-                print(f"[ENTRY WAIT] {entry_name} already queued for {car_plate}; skipping duplicate.")
-                return {"status": "queued", "entry": entry_name, "duplicate": True}
-            print(f"[ENTRY WAIT] {entry_name} occupied -> queueing {car_plate}")
-            queue.put_nowait({"car_plate": car_plate, "assigned_spot": assigned_spot})
-            return {"status": "queued", "entry": entry_name}
-        entry_occupied[entry_name] = True
+    if entry_occupied[entry_name]:
+        print(
+            f"[ENTRY WAIT] {entry_name} occupied -> queueing {car_plate}"
+            + (f" for {assigned_spot}" if assigned_spot else "")
+        )
+        await entry_queues[entry_name].put({"car_plate": car_plate, "assigned_spot": assigned_spot})
+        return {"status": "queued", "entry": entry_name}
+
+    print(
+        f"[ENTRY ROUTE] {entry_name} is free -> sending {car_plate}"
+        + (f" for {assigned_spot}" if assigned_spot else "")
+    )
+    entry_occupied[entry_name] = True
+    entry_occupied_since[entry_name] = time.time()   # watchdog timestamp
+    entry_car[entry_name] = car_plate                 # watchdog nudge tracking
 
     try:
         result = await api_send_car_to_destination(car_plate, entry_name)
         return result if isinstance(result, dict) else {"status": "success", "result": result}
+    except HTTPException as exc:
+        detail_str = str(getattr(exc, "detail", "") or "").lower()
+        if "occupied" in detail_str or exc.status_code in (409, 422):
+            # The EntrySpot is PHYSICALLY occupied by another car.
+            # Keep our lock (entry_occupied stays True) and re-queue this car
+            # so it is retried as soon as the spot clears.
+            print(
+                f"[ENTRY ROUTE] Simulator says {entry_name} occupied "
+                f"-> requeueing {car_plate}."
+            )
+            entry_occupied_since[entry_name] = time.time()  # reset watchdog timer
+            await entry_queues[entry_name].put(
+                {"car_plate": car_plate, "assigned_spot": assigned_spot}
+            )
+            return {"status": "requeued", "entry": entry_name}
+        else:
+            # Some other API error — release the lock so the spot doesn't freeze.
+            entry_occupied[entry_name] = False
+            entry_occupied_since[entry_name] = 0.0
+            entry_car[entry_name] = None
+            raise
     except Exception:
-        await process_waiting_entry(entry_name)
+        # Network / unexpected error — release the lock.
+        entry_occupied[entry_name] = False
+        entry_occupied_since[entry_name] = 0.0
+        entry_car[entry_name] = None
         raise
 
 async def api_charge_car(car_name: str, parking_cost: float, charging_cost: float):
@@ -870,6 +916,7 @@ async def process_car_entry(data: dict):
     except Exception:
         pass
 
+
     recent_car_arrivals.append({
         "car_plate": car_plate, "car_type": car_type, "spot_name": spot_name,
         "parking_duration": planned_dur, "event_time": server_time, "raw_event": data,
@@ -960,11 +1007,20 @@ async def process_car_entry(data: dict):
                     f"needs {target_gate} -> {target_entry}."
                 )
 
-                if current_gate == "gate3" and zone1_spots:
-                    await api_close_barrier_gate("gate3")
-                elif current_gate == "gate5" and (zone1_spots or zone2_spots):
-                    await api_close_barrier_gate("gate5")
-                await send_car_to_entry_or_queue(car_plate, target_entry, assigned_spot)
+                # if current_gate == "gate3" and zone1_spots:
+                #     print(f"[ZONE GUARD] Zone 1 not full -> closing gate3.")
+                #     await api_close_barrier_gate("gate3")
+                # elif current_gate == "gate5" and (zone1_spots or zone2_spots):
+                #     print(f"[ZONE GUARD] Zone 1/2 not full -> closing gate5.")
+                #     await api_close_barrier_gate("gate5")
+
+                # Do NOT blindly send the car to ENTRY2/ENTRY3. The simulator
+                # rejects the request when another car is already occupying
+                # that EntrySpot. Use send_car_to_entry_or_queue so the
+                # occupancy guard and FIFO queue handle the collision safely.
+                await send_car_to_entry_or_queue(
+                    car_plate, target_entry, assigned_spot
+                )
         else:
             print(f"[ENTRY] No spot for {car_plate} ({norm_type}) -> leavepark.")
             open_gate    = next((g for g in ENTRANCE_GATES if gate_operable.get(g)), None)
@@ -986,6 +1042,30 @@ async def process_car_entry(data: dict):
 # -------------------------------------------------
 # BUSINESS LOGIC - CAR EXIT
 # -------------------------------------------------
+
+async def _precharge_car_on_departure(car_plate: str, spot_name: str):
+    """
+    Pre-charge a car as soon as it leaves its parking spot (Park CarOut).
+    By the time the car reaches the ExitSpot, payment is already confirmed
+    and the gate opens without any extra delay.
+    """
+    car_info  = active_cars.get(car_plate, {})
+    raw_type  = car_info.get("car_type", "Normal")
+    norm_type = normalize_vehicle_type(raw_type)
+    is_ev     = (norm_type == "Electric")
+    duration  = float(car_info.get("planned_duration", 1) or 1)
+    parking_cost  = float(max(1, round(duration)))
+    charging_cost = float(parking_cost * 2.0) if is_ev else 0.0
+    print(f"[PRE-CHARGE] {car_plate} departed {spot_name}: parking=${parking_cost}, EV=${charging_cost}")
+    try:
+        await api_charge_car(car_plate, parking_cost, charging_cost)
+        charged_cars.add(car_plate)
+        if car_plate in active_cars:
+            active_cars[car_plate]["charged"] = True
+        print(f"[PRE-CHARGE] {car_plate} charged successfully.")
+    except Exception as e:
+        print(f"[PRE-CHARGE] {car_plate} charge failed (will retry at exit): {e}")
+
 
 async def process_car_exit(data: dict):
     global _last_sim_hour
@@ -1047,18 +1127,21 @@ async def process_car_exit(data: dict):
         parking_cost  = float(max(1, math.ceil(duration)))
         charging_cost = parking_cost if is_ev else 0.0
         print(f"[EXIT] Charging {car_plate}: parking=${parking_cost}, EV=${charging_cost}")
-        try:
-            await api_charge_car(car_plate, parking_cost, charging_cost)
-            charged_cars.add(car_plate)
-            asyncio.create_task(store_charge_async(
-                car_plate, parking_cost, charging_cost, duration, norm_type, charge_at,
-            ))
-            if car_plate in active_cars:
-                active_cars[car_plate]["charged"] = True
-            payment_ok = True
-            print(f"[EXIT] Payment confirmed for {car_plate}.")
-        except Exception as e:
-            print(f"[EXIT ERROR] Charge failed for {car_plate}: {e}")
+        # Retry up to 3 times with a short gap so transient API errors don't
+        # permanently block the gate.
+        for attempt in range(1, 4):
+            try:
+                await api_charge_car(car_plate, parking_cost, charging_cost)
+                charged_cars.add(car_plate)
+                if car_plate in active_cars:
+                    active_cars[car_plate]["charged"] = True
+                payment_ok = True
+                print(f"[EXIT] Payment confirmed for {car_plate} (attempt {attempt}).")
+                break
+            except Exception as e:
+                print(f"[EXIT] Charge attempt {attempt}/3 failed for {car_plate}: {e}")
+                if attempt < 3:
+                    await asyncio.sleep(1.0)
     else:
         print(f"[EXIT] {car_plate} already charged.")
 
@@ -1073,7 +1156,105 @@ async def process_car_exit(data: dict):
         print(f"[EXIT] Queuing {car_plate} for exit via {exit_gate}.")
         await gate_queues[exit_gate].put({"car_plate": car_plate, "gate_name": exit_gate})
     else:
-        print(f"[EXIT] Payment NOT confirmed for {car_plate} - gate stays CLOSED.")
+        # All charge attempts failed.  Rescue the car so it isn't trapped at
+        # the ExitSpot forever (simulator: 'No valid escape spot found').
+        print(f"[EXIT] All charge attempts failed for {car_plate} — rescuing.")
+        freed = car_info.get("assigned_spot") or car_info.get("parked_spot")
+        if freed and freed in parking_spots:
+            parking_spots[freed] = True
+        if car_plate in active_cars:
+            active_cars[car_plate]["assigned_spot"] = None
+        asyncio.create_task(rescue_stuck_car(car_plate, "charge failed after 3 attempts"))
+
+
+# -------------------------------------------------
+# ENTRY SPOT WATCHDOG
+# -------------------------------------------------
+
+async def rescue_stuck_car(car_plate: str, reason: str):
+    """
+    Last-resort escape: find any operable exit gate and route `car_plate`
+    through it to leavepark.  Used when a car is stuck with no valid
+    parking destination (e.g. park is full, all spots broken).
+    """
+    print(f"[RESCUE] {car_plate} - {reason}. Looking for an exit gate...")
+    for g in EXIT_GATES:
+        if await is_component_operable(g):
+            print(f"[RESCUE] {car_plate} -> leavepark via {g}.")
+            await gate_queues[g].put({"car_plate": car_plate, "gate_name": g})
+            return
+    # All exit gates inoperable — try direct goto as absolute fallback.
+    print(f"[RESCUE] All exit gates blocked for {car_plate} -> direct leavepark.")
+    try:
+        await api_send_car_to_destination(car_plate, "leavepark")
+    except Exception as exc:
+        print(f"[RESCUE ERROR] {car_plate}: {exc}")
+
+async def entry_spot_watchdog_worker():
+    """
+    Polls every 5 seconds.  If any EntrySpot has been occupied for longer than
+    ENTRY_SPOT_TIMEOUT_SECONDS:
+      1. Try to nudge the stuck car toward its assigned parking spot via the
+         gate queue so it stops blocking the entry.
+      2. Force-release the entry_occupied flag.
+      3. Drain the per-entry queue so the next waiting car can proceed.
+    """
+    print("[ENTRY WATCHDOG] Entry spot watchdog started.")
+    while True:
+        await asyncio.sleep(5.0)
+        now = time.time()
+        for entry_name, occupied in list(entry_occupied.items()):
+            if not occupied:
+                continue
+            elapsed = now - entry_occupied_since.get(entry_name, now)
+            if elapsed < ENTRY_SPOT_TIMEOUT_SECONDS:
+                continue
+
+            print(
+                f"[ENTRY WATCHDOG] {entry_name} occupied for {elapsed:.0f}s "
+                f"(>{ENTRY_SPOT_TIMEOUT_SECONDS}s) — nudging & force-releasing."
+            )
+
+            # Try to nudge the stuck car toward its parking spot.
+            # If no valid spot exists, rescue it out through an exit gate.
+            stuck_plate = entry_car.get(entry_name)
+            if stuck_plate:
+                car_info   = active_cars.get(stuck_plate, {})
+                stuck_spot = car_info.get("assigned_spot")
+                already_parked = car_info.get("parked", False)
+
+                if stuck_spot and not already_parked and spot_gate(stuck_spot) in ENTRANCE_GATES:
+                    # Car has a valid unparked destination — nudge through the gate.
+                    target_gate = spot_gate(stuck_spot)
+                    print(
+                        f"[ENTRY WATCHDOG] Nudging {stuck_plate} "
+                        f"-> {target_gate} for {stuck_spot}."
+                    )
+                    await gate_queues[target_gate].put({
+                        "car_plate":   stuck_plate,
+                        "gate_name":   target_gate,
+                        "destination": stuck_spot,
+                    })
+                else:
+                    # No valid spot (full park, spot cleared, or already parked).
+                    # Send the car out so it doesn't block the entry indefinitely.
+                    asyncio.create_task(
+                        rescue_stuck_car(
+                            stuck_plate,
+                            f"stuck at {entry_name} with no valid destination"
+                        )
+                    )
+                    # Free any reserved spot so the pool is correct.
+                    if stuck_spot and stuck_spot in parking_spots:
+                        parking_spots[stuck_spot] = True
+                    if stuck_plate in active_cars:
+                        active_cars[stuck_plate]["assigned_spot"] = None
+
+            # Force-release so queued cars can proceed.
+            entry_occupied[entry_name] = False
+            entry_occupied_since[entry_name] = 0.0
+            entry_car[entry_name] = None
+            asyncio.create_task(process_waiting_entry(entry_name))
 
 
 # -------------------------------------------------
@@ -1090,6 +1271,7 @@ async def startup_event():
     asyncio.create_task(auto_light_controller_worker())
     asyncio.create_task(co_monitor_worker())
     asyncio.create_task(usage_cycle_tracker_worker())
+    asyncio.create_task(entry_spot_watchdog_worker())
     print("[STARTUP] Closing all 6 gates...")
     try:
         await asyncio.gather(*[
@@ -1170,39 +1352,57 @@ async def webhook(request: Request):
 
     # Ground-truth parking sync
     if spot_type == "Park" or (spot_name and spot_name in parking_spots):
-        async with spot_lock:
-            if direction == "CarIn":
-                parking_spots[spot_name] = False
-                if car_plate:
-                    if car_plate not in active_cars:
-                        active_cars[car_plate] = {
-                            "entry_time":       data.get("ServerDateTime",""),
-                            "car_type":         data.get("CarType","Normal"),
-                            "assigned_spot":    spot_name,
-                            "parked_spot":      spot_name,
-                            "planned_duration": float(data.get("PlannedParkingDurationInMinutes",1) or 1),
-                            "charged": False, "parked": True,
-                        }
-                    else:
-                        active_cars[car_plate]["assigned_spot"] = spot_name
-                        active_cars[car_plate]["parked_spot"]   = spot_name
-                        active_cars[car_plate]["parked"]        = True
-                print(f"[SENSOR] {spot_name} OCCUPIED by {car_plate}.")
-            elif direction == "CarOut":
-                parking_spots[spot_name] = True
-                for p, info in list(active_cars.items()):
-                    if info.get("assigned_spot") == spot_name:
-                        info["assigned_spot"] = None
-                print(f"[SENSOR] {spot_name} FREE.")
+        if direction == "CarIn":
+            parking_spots[spot_name] = False
+            if car_plate:
+                if car_plate not in active_cars:
+                    active_cars[car_plate] = {
+                        "entry_time":       data.get("ServerDateTime",""),
+                        "car_type":         data.get("CarType","Normal"),
+                        "assigned_spot":    spot_name,
+                        "parked_spot":      spot_name,
+                        "planned_duration": float(data.get("PlannedParkingDurationInMinutes",1) or 1),
+                        "charged": False, "parked": True,
+                    }
+                else:
+                    active_cars[car_plate]["assigned_spot"] = spot_name
+                    active_cars[car_plate]["parked_spot"]   = spot_name
+                    active_cars[car_plate]["parked"]        = True
+            print(f"[SENSOR] {spot_name} OCCUPIED by {car_plate}.")
+        elif direction == "CarOut":
+            parking_spots[spot_name] = True
+            for p, info in list(active_cars.items()):
+                if info.get("assigned_spot") == spot_name:
+                    info["assigned_spot"] = None
+            print(f"[SENSOR] {spot_name} FREE.")
+            # Pre-charge the car as soon as it leaves the parking spot so the
+            # payment is already confirmed by the time it reaches the exit gate.
+            if car_plate and car_plate not in charged_cars:
+                asyncio.create_task(_precharge_car_on_departure(car_plate, spot_name))
 
     if spot_type == "EntrySpot" or (spot_name and spot_name.upper().startswith("ENTRY")):
         entry_name = (spot_name or "ENTRY1").upper()
         if entry_name in entry_occupied:
             if direction == "CarIn":
-                async with entry_lock:
-                    entry_occupied[entry_name] = True
+                entry_occupied[entry_name] = True
+                entry_occupied_since[entry_name] = time.time()  # sync watchdog timer
+                entry_car[entry_name] = car_plate
+                print(
+                    f"[ENTRY SENSOR] {entry_name} OCCUPIED by {car_plate}."
+                )
             elif direction == "CarOut":
-                asyncio.create_task(auto_close_gate_after_delay(gate_for_entry_spot(entry_name), 0.3))
+                entry_occupied[entry_name] = False
+                entry_occupied_since[entry_name] = 0.0
+                entry_car[entry_name] = None
+                print(
+                    f"[ENTRY SENSOR] {entry_name} FREE."
+                )
+                asyncio.create_task(
+                    auto_close_gate_after_delay(
+                        gate_for_entry_spot(entry_name), 0.3
+                    )
+                )
+                # Release the next queued car now that the EntrySpot is free.
                 asyncio.create_task(process_waiting_entry(entry_name))
 
     if (spot_type == "ExitSpot" or (spot_name and spot_name.upper().startswith("EXIT"))) and direction == "CarOut":
