@@ -185,6 +185,10 @@ export async function closeGate(gateName) {
   return await request(`/api/control/gates/${encodeURIComponent(gateName)}/close`, { method: 'POST' });
 }
 
+export async function enableAutomaticGates() {
+  return await request('/api/control/gates/automatic', { method: 'POST' });
+}
+
 export async function repairGate(gateName) {
   return await request(`/api/control/gates/${encodeURIComponent(gateName)}/repair`, { method: 'POST' });
 }
@@ -498,7 +502,7 @@ export async function getFinancialReport(date) {
   return {
     parkingRevenue: Number(report.parking_revenue) || 0,
     evChargingRevenue: Number(report.ev_charging_revenue) || 0,
-    penaltyCost: Number(report.penalty_cost) || 0,
+    penaltyIncome: Number(report.penalty_income ?? report.penalty_cost) || 0,
     totalRevenue: Number(report.total_revenue) || 0,
     netRevenue: Number(report.net_revenue) || 0,
     breakdown: (report.breakdown || []).map((row) => ({
@@ -507,6 +511,10 @@ export async function getFinancialReport(date) {
       amount: Number(row.amount) || 0,
     })),
   };
+}
+
+export async function getPaymentRecords(date) {
+  return await request(`/api/logs/payments?day=${encodeURIComponent(date)}&limit=100`);
 }
 
 export async function chargeCar(plateNumber, parkingCost = 0.0, chargingCost = 0.0) {

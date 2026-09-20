@@ -119,6 +119,27 @@ CREATE TABLE IF NOT EXISTS parking_sessions (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- ---------------------------------------------------------------------
+-- payment_records: accepted simulator charges, one per parking visit.
+-- Parking and EV components are stored separately for financial reporting.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS payment_records (
+    id                 INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+    parking_session_id INT UNSIGNED  NOT NULL,
+    car_plate          VARCHAR(32)   NOT NULL,
+    car_type           ENUM('Electric','Accessible','Any') NULL,
+    parking_fee        DECIMAL(10,2) NOT NULL,
+    ev_fee             DECIMAL(10,2) NOT NULL,
+    total_amount       DECIMAL(10,2) NOT NULL,
+    paid_at            DATETIME      NOT NULL,
+    source             VARCHAR(32)   NOT NULL DEFAULT 'SIMULATOR_CHARGE',
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_payment_session (parking_session_id),
+    CONSTRAINT fk_payment_session FOREIGN KEY (parking_session_id) REFERENCES parking_sessions (id),
+    KEY ix_payment_paid_at (paid_at),
+    KEY ix_payment_plate (car_plate)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- ---------------------------------------------------------------------
 -- events: audit log + dashboard activity feed.
 -- Raw simulator webhook payloads are stored in raw_data, untouched.
 -- event_type examples: WEBHOOK (raw, not yet understood), CAR_ARRIVED, SPOT_ASSIGNED,

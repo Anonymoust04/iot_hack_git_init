@@ -21,3 +21,9 @@ def has_manual_override(name: str) -> bool:
 
 def clear_manual_override(name: str) -> None:
     set_manual_override(name, False)
+
+
+def clear_manual_overrides(names: list[str]) -> None:
+    with _lock:
+        for name in names:
+            _overrides.pop(name, None)

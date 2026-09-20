@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from app.api.deps import AdminUser, DbSession, FanControlUser, GateControlUser, LightControlUser, OperatorUser, RepairUser
 from app.models import GateState
 from app.services.audit import audited
-from app.services.device_overrides import set_manual_override
+from app.services.device_overrides import clear_manual_overrides, set_manual_override
 from app.services.components import set_gate_state
 from app.services.login_attempts import client_ip
 from app.services.simulator_client import get_simulator
@@ -47,6 +47,15 @@ def gate_action(name: str, action: Literal["open", "close", "repair"], request: 
     if moving:
         set_gate_state(db, name, moving)
     return {"gate": name, "action": action}
+
+
+@router.post("/gates/automatic", status_code=status.HTTP_202_ACCEPTED)
+def enable_automatic_gates(request: Request, db: DbSession, user: GateControlUser):
+    """Release manual gate overrides so car-driven gate automation can operate."""
+    clear_manual_overrides(["gate1", "gate2", "gate3", "gate4", "gate5", "gate6"])
+    with _audit(db, request, user, "GATES_AUTOMATIC", "system"):
+        pass
+    return {"status": "automatic", "message": "Automatic gate control enabled"}
 
 
 @router.post("/cars/{plate}/goto/{destination}", status_code=status.HTTP_202_ACCEPTED)

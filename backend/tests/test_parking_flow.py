@@ -165,7 +165,7 @@ def test_full_lifecycle_and_charge_only_once(db):
     db.expire_all()
     session = db.scalars(select(ParkingSession).where(ParkingSession.car_plate == "EV1")).one()
     assert session.status == SessionStatus.COMPLETED
-    assert session.payment_status == PaymentStatus.PAID
+    assert session.payment_status == PaymentStatus.PENDING  # quoted, but no accepted payment
     assert session.exit_time is not None and session.parking_cost is not None  # history kept
     types = db.scalars(select(Event.event_type).where(Event.car_plate == "EV1").order_by(Event.id)).all()
     assert types == ["SPOT_ASSIGNED", "CAR_PARKED", "CAR_EXITING", "CAR_CHARGED", "CAR_DEPARTED"]

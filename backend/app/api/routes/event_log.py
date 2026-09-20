@@ -11,7 +11,7 @@ from app.api.deps import CurrentUser, DbSession
 from app.api.deps import require_permission
 from app.core.permissions import Permission
 from app.models import User
-from app.services.event_log import daily_summary, financial_summary, search_events
+from app.services.event_log import daily_summary, financial_summary, list_payment_records, search_events
 
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
@@ -50,6 +50,7 @@ class FinancialSummaryOut(BaseModel):
     date: date
     parking_revenue: Decimal
     ev_charging_revenue: Decimal
+    penalty_income: Decimal
     penalty_cost: Decimal
     total_revenue: Decimal
     net_revenue: Decimal
@@ -57,6 +58,19 @@ class FinancialSummaryOut(BaseModel):
     charging_transactions: int
     penalty_transactions: int
     breakdown: list[dict]
+
+
+class PaymentRecordOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    car_plate: str
+    car_type: str | None
+    parking_fee: Decimal
+    ev_fee: Decimal
+    total_amount: Decimal
+    paid_at: datetime
+    source: str
 
 
 FinancialReportUser = Annotated[
@@ -96,3 +110,14 @@ def financial(
 ):
     """Financial data is database-backed and restricted to financial-report permission."""
     return financial_summary(db, day or datetime.now(timezone.utc).date())
+
+
+@router.get("/payments", response_model=list[PaymentRecordOut])
+def payments(
+    db: DbSession,
+    _: FinancialReportUser,
+    day: date | None = None,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    return list_payment_records(db, day or datetime.now(timezone.utc).date(), limit=limit, offset=offset)

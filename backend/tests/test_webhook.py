@@ -166,7 +166,7 @@ def test_car_visit_updates_spots_and_history(db, client, admin_headers):
 
     db.expire_all()
     session = db.scalars(select(ParkingSession).where(ParkingSession.car_plate == plate)).one()
-    assert (session.status, session.payment_status) == (SessionStatus.COMPLETED, PaymentStatus.PAID)
+    assert (session.status, session.payment_status) == (SessionStatus.COMPLETED, PaymentStatus.PENDING)
     # entry = arrival at the entrance, exit = left the park, both on the simulator clock
     assert (str(session.entry_time), str(session.exit_time)) == ("2026-09-12 15:40:17", "2026-09-12 15:42:41")
     assert [t for t in event_types(db, plate) if t != "WEBHOOK"] == [

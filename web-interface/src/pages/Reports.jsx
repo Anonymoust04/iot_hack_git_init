@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { getDailyReport, getFinancialReport } from "../services/api";
+import { getDailyReport, getFinancialReport, getPaymentRecords } from "../services/api";
 import "../styles/Reports.css";
 
 const dailyMetrics = [
@@ -17,16 +17,12 @@ const dailyMetrics = [
 const financialMetrics = [
   ["Parking Fees", "parkingRevenue"],
   ["EV Extra Fees", "evChargingRevenue"],
-  ["Penalty Cost", "penaltyCost"],
+  ["Penalty Income", "penaltyIncome"],
   ["Gross Revenue", "totalRevenue"],
-  ["Net After Penalties", "netRevenue"],
 ];
 
 function localToday() {
-  const now = new Date();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${now.getFullYear()}-${month}-${day}`;
+  return new Date().toISOString().slice(0, 10);
 }
 
 function money(value) {
@@ -48,6 +44,7 @@ function Reports() {
   const [date, setDate] = useState(localToday);
   const [dailyReport, setDailyReport] = useState(null);
   const [financialReport, setFinancialReport] = useState(null);
+  const [payments, setPayments] = useState([]);
   const [error, setError] = useState(null);
   const [loadedKey, setLoadedKey] = useState(null);
   const requestKey = `${tab}:${date}`;
@@ -62,11 +59,12 @@ function Reports() {
         .catch((err) => { if (active) { setDailyReport(null); setError(err.message); } })
         .finally(() => { if (active) setLoadedKey(requestKey); });
     } else {
-      getFinancialReport(date)
-        .then((report) => { if (active) { setFinancialReport(report || null); setError(null); } })
+      Promise.all([getFinancialReport(date), getPaymentRecords(date)])
+        .then(([report, records]) => { if (active) { setFinancialReport(report || null); setPayments(records || []); setError(null); } })
         .catch((err) => {
           if (!active) return;
           setFinancialReport(null);
+          setPayments([]);
           // 403 = the account lacks the FINANCIAL_REPORTS authority
           setError(/403|forbidden|permission/i.test(err.message) ? "You do not have the financial report permission." : err.message);
         })
@@ -87,7 +85,7 @@ function Reports() {
       </header>
 
       <div className="reports-toolbar">
-        <label className="reports-date">Report date <input type="date" value={date} onChange={(event) => { setDailyReport(null); setFinancialReport(null); setError(null); setDate(event.target.value); }} /></label>
+        <label className="reports-date">Report date (UTC) <input type="date" value={date} onChange={(event) => { setDailyReport(null); setFinancialReport(null); setPayments([]); setError(null); setDate(event.target.value); }} /></label>
       </div>
 
       {tab === "daily" ? (
@@ -127,7 +125,7 @@ function Reports() {
           </section>
           <section className="reports-panel">
             <h2>Financial Breakdown</h2>
-            <p className="reports-note">Gross revenue = parking fees + EV extra fees. Net revenue = gross revenue − penalty cost.</p>
+            <p className="reports-note">Gross revenue = parking fees + EV extra fees + penalty income.</p>
             {hasFinancialActivity ? (
               <div className="reports-table-scroll"><table className="reports-table">
                 <thead><tr><th>CATEGORY</th><th>TRANSACTIONS</th><th>AMOUNT</th></tr></thead>
@@ -136,6 +134,21 @@ function Reports() {
                 ))}</tbody>
               </table></div>
             ) : <p className="reports-empty">No paid charges or penalties for this date.</p>}
+          </section>
+          <section className="reports-panel">
+            <h2>Payment Records (latest 100)</h2>
+            {payments.length ? (
+              <div className="reports-table-scroll"><table className="reports-table">
+                <thead><tr><th>PAID AT (UTC)</th><th>PLATE</th><th>TYPE</th><th>PARKING</th><th>EV EXTRA</th><th>TOTAL</th></tr></thead>
+                <tbody>{payments.map((payment) => (
+                  <tr key={payment.id}>
+                    <td>{payment.paid_at?.replace("T", " ") ?? "—"}</td>
+                    <td>{payment.car_plate}</td><td>{payment.car_type ?? "—"}</td>
+                    <td>{money(payment.parking_fee)}</td><td>{money(payment.ev_fee)}</td><td>{money(payment.total_amount)}</td>
+                  </tr>
+                ))}</tbody>
+              </table></div>
+            ) : <p className="reports-empty">No accepted car payments for this date.</p>}
           </section>
           </>}
         </>

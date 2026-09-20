@@ -18,12 +18,13 @@ from app.config import ROOT_DIR, get_settings
 from app.core.security import hash_password
 from app.db.session import Base, SessionLocal, engine
 from app.models import Role, User
+from app.models.payment_record import PaymentRecord  # noqa: F401  (register model for schema checks)
 
 log = logging.getLogger(__name__)
 
 SCHEMA_FILE = ROOT_DIR / "database" / "schema.sql"
 # Child tables first (foreign keys). Includes tables from the old scaffold so --reset cleans them.
-ALL_TABLES = ["events", "parking_sessions", "parking_spots", "gates", "user_permissions", "users", "event_logs", "zones"]
+ALL_TABLES = ["events", "payment_records", "parking_sessions", "parking_spots", "gates", "user_permissions", "users", "event_logs", "zones"]
 
 
 def schema_statements() -> list[str]:

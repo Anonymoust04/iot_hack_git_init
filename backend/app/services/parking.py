@@ -17,7 +17,7 @@ Lifecycle:
     mark_leaving_spot  spot ->FREE                session EXITING   (frees the spot EARLY)
     record_charge      -                          costs + exit_time (once only!)
     record_payment     -                          PAID, only if the amount matches our charge
-    complete_departure spot ->FREE (if still held) session COMPLETED, PAID
+    complete_departure spot ->FREE (if still held) session COMPLETED (payment status unchanged)
 
 `at` parameters: the simulator's own clock (webhook ServerDateTime). It runs apart from real
 time, so entry and exit must both come from it for the billed minutes to be right.
@@ -45,6 +45,7 @@ from app.models import (
     SpotStatus,
     utcnow,
 )
+from app.models.payment_record import PaymentRecord
 from app.services.billing import calculate_charge
 
 log = logging.getLogger(__name__)
@@ -322,6 +323,8 @@ def store_charge(db: Session, plate: str, parking_cost: float, charging_cost: fl
     try:
         now = at or utcnow()
         session = active_session(db, plate, lock=True)
+        if session is not None and session.entry_time > now:
+            session = None  # a new visit began before the previous charge writer ran
         if session is None:
             # The exit webhook can complete the visit before the asynchronous
             # charge writer runs. Attach the fee to that visit, not a new one.
@@ -339,11 +342,12 @@ def store_charge(db: Session, plate: str, parking_cost: float, charging_cost: fl
             entry = now - timedelta(minutes=minutes) if minutes else now
             session = ParkingSession(car_plate=plate, car_type=car_type, entry_time=entry)
             db.add(session)
-        if session.parking_cost is not None:
-            db.commit()   # already recorded (duplicate exit event): never double-count revenue
+        db.flush()  # a newly recovered visit needs an id for its payment record
+        if db.scalar(select(PaymentRecord.id).where(PaymentRecord.parking_session_id == session.id)):
+            db.commit()   # duplicate exit event: never double-count revenue
             return
-        session.parking_cost = Decimal(str(round(float(parking_cost), 2)))
-        session.charging_cost = Decimal(str(round(float(charging_cost), 2)))
+        session.parking_cost = Decimal(str(parking_cost)).quantize(Decimal("0.01"))
+        session.charging_cost = Decimal(str(charging_cost)).quantize(Decimal("0.01"))
         if session.car_type is None:
             session.car_type = car_type
         # This column is the billing end time. The exit webhook may have set it
@@ -351,6 +355,12 @@ def store_charge(db: Session, plate: str, parking_cost: float, charging_cost: fl
         session.exit_time = now
         session.payment_status = PaymentStatus.PAID
         session.status = SessionStatus.EXITING if session.status != SessionStatus.COMPLETED else session.status
+        db.add(PaymentRecord(
+            parking_session_id=session.id, car_plate=plate, car_type=session.car_type,
+            parking_fee=session.parking_cost, ev_fee=session.charging_cost,
+            total_amount=session.parking_cost + session.charging_cost,
+            paid_at=now, source="SIMULATOR_CHARGE",
+        ))
         log_event(db, "CAR_CHARGED", car_plate=plate,
                   raw_data={"parking_cost": float(parking_cost), "charging_cost": float(charging_cost),
                             "minutes": minutes})
@@ -452,15 +462,14 @@ def expire_stale_sessions(db: Session, older_than: timedelta, now: datetime | No
 @retry_on_deadlock
 def complete_departure(db: Session, plate: str, raw_data: dict | None = None, at: datetime | None = None) -> None:
     """Car has left the car park. All in ONE transaction:
-    session -> COMPLETED + PAID (exit_time/costs kept), spot -> FREE, departure event."""
+    session -> COMPLETED (existing payment status kept), spot -> FREE, departure event."""
     try:
         session = active_session(db, plate, lock=True)  # 1. find active session
         spot_name = None
         if session:
             session.exit_time = session.exit_time or at or utcnow()  # 2. exit time (set at charge)
             # 3./4. parking_cost / charging_cost were stored by record_charge()
-            session.payment_status = PaymentStatus.PAID            # 5.
-            session.status = SessionStatus.COMPLETED               # 6.
+            session.status = SessionStatus.COMPLETED
             if session.parking_spot_id:
                 spot = db.get(ParkingSpot, session.parking_spot_id, with_for_update=True)
                 if spot and spot.current_car == plate:             # 7./8. free spot (if not already)

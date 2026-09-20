@@ -6,8 +6,9 @@ from decimal import Decimal
 from sqlalchemy import Numeric, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models import ParkingSession, PaymentStatus
+from app.models import ParkingSession
 from app.models.event import Event
+from app.models.payment_record import PaymentRecord
 from app.services.penalties import penalty_summary
 
 
@@ -116,34 +117,33 @@ def daily_summary(db: Session, day: date) -> dict:
 
 
 def financial_summary(db: Session, day: date) -> dict:
-    """Summarize paid database transactions and penalties for one UTC day."""
+    """Sum accepted simulator payments and penalty income for one UTC day."""
     start = datetime.combine(day, time.min)
     end = start + timedelta(days=1)
     parking_revenue, charging_revenue, parking_transactions, charging_transactions = db.execute(
         select(
-            func.coalesce(func.sum(ParkingSession.parking_cost), ZERO),
-            func.coalesce(func.sum(ParkingSession.charging_cost), ZERO),
-            func.count(ParkingSession.id),
-            func.sum(case((ParkingSession.charging_cost > ZERO, 1), else_=0)),
+            func.coalesce(func.sum(PaymentRecord.parking_fee), ZERO),
+            func.coalesce(func.sum(PaymentRecord.ev_fee), ZERO),
+            func.count(PaymentRecord.id),
+            func.sum(case((PaymentRecord.ev_fee > ZERO, 1), else_=0)),
         ).where(
-            ParkingSession.payment_status == PaymentStatus.PAID,
-            ParkingSession.parking_cost.is_not(None),
-            ParkingSession.exit_time >= start,
-            ParkingSession.exit_time < end,
+            PaymentRecord.paid_at >= start,
+            PaymentRecord.paid_at < end,
         )
     ).one()
     penalties = penalty_summary(db, since=start, until=end - timedelta(microseconds=1))
     parking_revenue = parking_revenue or ZERO
     charging_revenue = charging_revenue or ZERO
     penalty_total = penalties["total_fine"] or ZERO
-    gross_revenue = parking_revenue + charging_revenue
+    gross_revenue = parking_revenue + charging_revenue + penalty_total
     return {
         "date": day,
         "parking_revenue": parking_revenue,
         "ev_charging_revenue": charging_revenue,
-        "penalty_cost": penalty_total,
+        "penalty_income": penalty_total,
+        "penalty_cost": penalty_total,  # legacy API field
         "total_revenue": gross_revenue,
-        "net_revenue": gross_revenue - penalty_total,
+        "net_revenue": gross_revenue,  # legacy API field; no expenses are tracked
         "parking_transactions": parking_transactions,
         "charging_transactions": charging_transactions or 0,
         "penalty_transactions": penalties["count"],
@@ -153,3 +153,15 @@ def financial_summary(db: Session, day: date) -> dict:
             {"category": "Penalties", "transactions": penalties["count"], "amount": penalty_total},
         ],
     }
+
+
+def list_payment_records(db: Session, day: date, *, limit: int = 50, offset: int = 0) -> list[PaymentRecord]:
+    """Accepted simulator payments on a UTC day, newest first."""
+    start = datetime.combine(day, time.min)
+    end = start + timedelta(days=1)
+    return db.scalars(
+        select(PaymentRecord)
+        .where(PaymentRecord.paid_at >= start, PaymentRecord.paid_at < end)
+        .order_by(PaymentRecord.paid_at.desc(), PaymentRecord.id.desc())
+        .limit(limit).offset(offset)
+    ).all()

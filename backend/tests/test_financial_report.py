@@ -7,12 +7,13 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from app.models import ParkingSession, PaymentStatus, SessionStatus
+from app.models.payment_record import PaymentRecord
 from app.services.event_log import financial_summary
 from app.models.event import Event
 from app.services.parking import store_charge
 
 
-def test_financial_summary_uses_paid_sessions_and_penalties(db):
+def test_financial_summary_uses_confirmed_payments_and_penalty_income(db):
     db.add_all([
         ParkingSession(
             car_plate="CAR-1", entry_time=datetime(2026, 9, 20, 8),
@@ -33,13 +34,21 @@ def test_financial_summary_uses_paid_sessions_and_penalties(db):
     ))
     db.commit()
 
+    paid = db.scalar(select(ParkingSession).where(ParkingSession.car_plate == "CAR-1"))
+    db.add(PaymentRecord(
+        parking_session_id=paid.id, car_plate=paid.car_plate,
+        parking_fee=Decimal("12.50"), ev_fee=Decimal("4.00"),
+        total_amount=Decimal("16.50"), paid_at=datetime(2026, 9, 20, 9),
+    ))
+    db.commit()
     report = financial_summary(db, date(2026, 9, 20))
 
     assert report["parking_revenue"] == Decimal("12.50")
     assert report["ev_charging_revenue"] == Decimal("4.00")
     assert report["penalty_cost"] == Decimal("3.50")
-    assert report["total_revenue"] == Decimal("16.50")
-    assert report["net_revenue"] == Decimal("13.00")
+    assert report["penalty_income"] == Decimal("3.50")
+    assert report["total_revenue"] == Decimal("20.00")
+    assert report["net_revenue"] == Decimal("20.00")
     assert report["parking_transactions"] == 1
     assert report["charging_transactions"] == 1
     assert report["penalty_transactions"] == 1
@@ -61,6 +70,13 @@ def test_financial_summary_uses_charge_date_and_ignores_uncharged_exits(db):
     ])
     db.commit()
 
+    paid = db.scalar(select(ParkingSession).where(ParkingSession.car_plate == "EV-NIGHT"))
+    db.add(PaymentRecord(
+        parking_session_id=paid.id, car_plate=paid.car_plate,
+        parking_fee=Decimal("11.00"), ev_fee=Decimal("11.00"),
+        total_amount=Decimal("22.00"), paid_at=datetime(2026, 9, 21, 0, 1),
+    ))
+    db.commit()
     assert financial_summary(db, date(2026, 9, 20))["total_revenue"] == Decimal("0.00")
     report = financial_summary(db, date(2026, 9, 21))
     assert report["total_revenue"] == Decimal("22.00")
@@ -84,6 +100,11 @@ def test_store_charge_attaches_to_completed_visit_after_exit_webhook(db):
     assert len(sessions) == 1
     assert sessions[0].parking_cost == Decimal("11.00")
     assert sessions[0].exit_time == charge_at
+    [payment] = db.scalars(select(PaymentRecord)).all()
+    assert payment.parking_session_id == sessions[0].id
+    assert payment.total_amount == Decimal("22.00")
+    store_charge(db, "RACE-EV", 11, 11, minutes=11, at=charge_at)
+    assert len(db.scalars(select(PaymentRecord)).all()) == 1
     assert financial_summary(db, date(2026, 9, 21))["total_revenue"] == Decimal("22.00")
 
 

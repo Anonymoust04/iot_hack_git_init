@@ -461,7 +461,7 @@ def co_needs_ventilation(risk: str | None, ppm: float | None) -> bool:
 
 async def store_charge_async(plate: str, parking_cost: float, charging_cost: float,
                              minutes: float, car_type: str, charged_at: datetime | None):
-    """Record an accepted charge in MySQL so the financial report is real (never blocks the exit)."""
+    """Record an accepted charge in MySQL; retry transient database failures."""
     def run():
         from app.db.session import SessionLocal
         from app.models import CarType
@@ -473,10 +473,14 @@ async def store_charge_async(plate: str, parking_cost: float, charging_cost: flo
             }.get(car_type, CarType.ANY)
             store_charge(db, plate, parking_cost, charging_cost, minutes=minutes,
                          at=charged_at, car_type=vehicle_type)
-    try:
-        await asyncio.to_thread(run)
-    except Exception as e:
-        print(f"[BILLING] charge for {plate} not saved: {e}")
+    for attempt in range(3):
+        try:
+            await asyncio.to_thread(run)
+            return
+        except Exception as e:
+            print(f"[BILLING] charge for {plate} not saved (attempt {attempt + 1}/3): {e}")
+            if attempt < 2:
+                await asyncio.sleep(attempt + 1)
 
 
 async def recover_manual_parking_async(plate: str, duration: float, raw_data: dict, car_type: str,
@@ -1146,11 +1150,9 @@ async def webhook(request: Request):
             component_health[comp] = {"broken": False, "under_maintenance": True}
 
     elif event_class in ("payment_made","payment_received"):
-        pay_plate = data.get("CarPlateNumber") or data.get("CarPlate")
-        if pay_plate:
-            charged_cars.add(pay_plate)
-            if pay_plate in active_cars:
-                active_cars[pay_plate]["charged"] = True
+        # The simulator can emit fake payment events. Only a successful /charge
+        # response confirms payment; the raw webhook remains in the audit log.
+        print(f"[PAYMENT] Unverified payment event for {data.get('CarPlateNumber') or data.get('CarPlate')}")
 
     elif event_class in ("carbon_monoxide_event","carbon_monoxide_level_change"):
         zone_name = data.get("ZoneName","ZONE1")
@@ -1632,5 +1634,8 @@ async def car_goto(name: str, _: CurrentUser, destination: str):
 
 @app.post("/car/{name}/charge")
 async def car_charge(name: str, _: CurrentUser, parking_cost: float = 0.0, charging_cost: float = 0.0):
-    return await api_charge_car(name, parking_cost, charging_cost)
+    result = await api_charge_car(name, parking_cost, charging_cost)
+    charged_cars.add(name)
+    await store_charge_async(name, parking_cost, charging_cost, 0, "Any", None)
+    return result
         

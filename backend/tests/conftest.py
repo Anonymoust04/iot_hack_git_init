@@ -54,7 +54,7 @@ def mysql():
 def db(mysql):
     """A session on a clean database (users kept, everything else emptied)."""
     with mysql.begin() as conn:
-        for table in ("events", "parking_sessions", "parking_spots", "gates"):
+        for table in ("events", "payment_records", "parking_sessions", "parking_spots", "gates"):
             conn.execute(text(f"DELETE FROM {table}"))
     session = SessionLocal()
     yield session

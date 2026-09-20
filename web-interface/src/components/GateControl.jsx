@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getBarriers, openGate, closeGate, repairGate } from '../services/api';
+import { enableAutomaticGates, getBarriers, openGate, closeGate, repairGate } from '../services/api';
 
 
 function GateControl({ systemOnline = false }) {
@@ -7,6 +7,8 @@ function GateControl({ systemOnline = false }) {
 
   const [loading, setLoading] = useState({});
   const [actionFeedback, setActionFeedback] = useState({});
+  const [automaticLoading, setAutomaticLoading] = useState(false);
+  const [automaticFeedback, setAutomaticFeedback] = useState(null);
 
   const refreshGates = async () => {
     if (!systemOnline) {
@@ -66,12 +68,51 @@ function GateControl({ systemOnline = false }) {
     }
   };
 
+  const handleEnableAutomatic = async () => {
+    setAutomaticLoading(true);
+    setAutomaticFeedback(null);
+    try {
+      await enableAutomaticGates();
+      setAutomaticFeedback({ type: 'success', msg: 'Automatic gate control enabled' });
+      await refreshGates();
+    } catch (err) {
+      setAutomaticFeedback({ type: 'error', msg: err.message });
+    } finally {
+      setAutomaticLoading(false);
+    }
+  };
+
   return (
     <section className="gate-section">
       <div className="section-header">
-        <div>
+        <div style={{ minWidth: 0 }}>
           <h2>Gate Control</h2>
           <p>Operator manual override and live status for barrier gates</p>
+        </div>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {automaticFeedback && (
+            <span style={{ fontSize: '0.8rem', color: automaticFeedback.type === 'error' ? '#ef4444' : '#10b981', fontWeight: 600 }}>
+              {automaticFeedback.msg}
+            </span>
+          )}
+          <button
+            type="button"
+            disabled={!systemOnline || automaticLoading}
+            onClick={handleEnableAutomatic}
+            title="Let the system open and close gates automatically for arriving and departing cars"
+            style={{
+              padding: '9px 14px',
+              border: '1px solid #2563eb',
+              borderRadius: '8px',
+              background: automaticLoading ? '#dbeafe' : '#2563eb',
+              color: automaticLoading ? '#1e3a8a' : '#fff',
+              fontWeight: 700,
+              cursor: !systemOnline || automaticLoading ? 'wait' : 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {automaticLoading ? 'Enabling...' : 'All Gates: Automatic'}
+          </button>
         </div>
       </div>
 
