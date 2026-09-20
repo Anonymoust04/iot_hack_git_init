@@ -39,6 +39,7 @@ def test_financial_summary_uses_paid_sessions_and_penalties(db):
     assert report["ev_charging_revenue"] == Decimal("4.00")
     assert report["penalty_cost"] == Decimal("3.50")
     assert report["total_revenue"] == Decimal("16.50")
+    assert report["net_revenue"] == Decimal("13.00")
     assert report["parking_transactions"] == 1
     assert report["charging_transactions"] == 1
     assert report["penalty_transactions"] == 1
@@ -63,6 +64,7 @@ def test_financial_summary_uses_charge_date_and_ignores_uncharged_exits(db):
     assert financial_summary(db, date(2026, 9, 20))["total_revenue"] == Decimal("0.00")
     report = financial_summary(db, date(2026, 9, 21))
     assert report["total_revenue"] == Decimal("22.00")
+    assert report["net_revenue"] == Decimal("22.00")
     assert report["parking_transactions"] == 1
     assert report["charging_transactions"] == 1
 

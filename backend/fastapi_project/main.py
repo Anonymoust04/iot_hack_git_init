@@ -163,6 +163,12 @@ recent_car_arrivals: list[dict] = []
 
 component_health: dict[str, dict] = {}
 usage_cycles:     dict[str, dict] = {}
+barrier_states:   dict[str, str] = {}
+spot_details:     dict[str, dict] = {}
+fan_details:      dict[str, dict] = {}
+repair_attempts:  dict[str, float] = {}
+REPAIR_RETRY_SECONDS = 60.0
+MAINTENANCE_SCAN_SECONDS = 15.0
 
 _last_sim_hour: int = 12
 
@@ -628,7 +634,8 @@ async def auto_light_controller_worker():
 async def usage_cycle_tracker_worker():
     print("[USAGE CYCLES] Usage cycle tracker started.")
     while True:
-        for endpoint, c_type in [("list-barriers", "gate"), ("list-lights", "light"), ("list-exhaust-fans", "fan")]:
+        # Gates, fans, and spots are collected by the maintenance scan.
+        for endpoint, c_type in [("list-lights", "light")]:
             try:
                 items = await call_simulator_api(endpoint)
                 if isinstance(items, list):
@@ -649,103 +656,157 @@ async def usage_cycle_tracker_worker():
 # PREVENTIVE MAINTENANCE WORKER
 # -------------------------------------------------
 
-async def _maintain_spot(name: str):
+async def _maintain_spot(name: str, reason: str = "maintenance alarm") -> bool:
     async with spot_lock:
         is_free     = parking_spots.get(name, True)
         is_assigned = any(info.get("assigned_spot") == name for info in active_cars.values())
-    if not is_free or is_assigned or has_manual_override(name):
-        return
+    detail = spot_details.get(name, {})
+    occupied = detail.get("isOccupied", False) or bool(detail.get("detectedCars"))
+    broken = component_health.get(name, {}).get("broken", False)
+    if occupied or is_assigned or (not is_free and not broken) or has_manual_override(name):
+        return False
     print(f"[PREEMPTIVE MAINTENANCE] Spot {name} IDLE - repairing...")
+    previous_health = component_health.get(name, {}).copy()
     async with spot_lock:
         parking_spots[name] = False
     component_health[name] = {"broken": False, "under_maintenance": True}
     try:
         await call_simulator_api(f"parking-spots/{name}/repair", method="POST")
-        await audit_system("AUTO_REPAIR", "spot", name, reason="preventive maintenance (usage cycles)")
+        await audit_system("AUTO_REPAIR", "spot", name, reason=reason)
     except Exception as err:
         print(f"[PREEMPTIVE MAINTENANCE ERROR] Spot {name}: {err}")
         await audit_system("AUTO_REPAIR", "spot", name, success=False, error=str(err)[:200])
+        component_health[name] = previous_health
         async with spot_lock:
-            parking_spots[name] = True
+            parking_spots[name] = is_free
+    return True
 
-async def _maintain_gate(name: str):
+async def _maintain_gate(name: str, reason: str = "maintenance alarm") -> bool:
     q = gate_queues.get(name)
-    if not q or not q.empty() or has_manual_override(name):
-        return
+    if (q is None or not q.empty() or has_manual_override(name)
+            or barrier_states.get(name, "").lower() != "closed"
+            or (name in ENTRANCE_GATES and entry_occupied[entry_spot_for_gate(name)])):
+        return False
     print(f"[PREEMPTIVE MAINTENANCE] Gate {name} IDLE - repairing...")
+    previous_health = component_health.get(name, {}).copy()
     component_health[name] = {"broken": False, "under_maintenance": True}
     try:
         await call_simulator_api(f"barrier-gates/{name}/repair", method="POST")
-        await audit_system("AUTO_REPAIR", "gate", name, reason="preventive maintenance (usage cycles)")
+        await audit_system("AUTO_REPAIR", "gate", name, reason=reason)
     except Exception as err:
         print(f"[PREEMPTIVE MAINTENANCE ERROR] Gate {name}: {err}")
         await audit_system("AUTO_REPAIR", "gate", name, success=False, error=str(err)[:200])
+        component_health[name] = previous_health
+    return True
 
 
-async def _maintain_fan(name: str):
+async def _maintain_fan(name: str, reason: str = "maintenance alarm") -> bool:
     if has_manual_override(name):
-        return
+        return False
+    detail = fan_details.get(name, {})
+    zone = str(detail.get("zoneParent") or "").upper()
+    co = zone_co.get(zone, {})
+    was_broken = component_health.get(name, {}).get("broken", False)
+    if not was_broken and (co_needs_ventilation(co.get("risk"), co.get("ppm"))
+                           or (detail.get("isOn") and not co)):
+        return False
     print(f"[PREEMPTIVE MAINTENANCE] Fan {name} - turning off and repairing...")
+    previous_health = component_health.get(name, {}).copy()
     component_health[name] = {"broken": False, "under_maintenance": True}
     try:
-        await call_simulator_api(f"exhaust-fans/{name}/off",    method="POST")
+        if not was_broken and detail.get("isOn"):
+            await call_simulator_api(f"exhaust-fans/{name}/off", method="POST")
         await call_simulator_api(f"exhaust-fans/{name}/repair", method="POST")
-        await audit_system("AUTO_REPAIR", "fan", name, reason="preventive maintenance (usage cycles)")
+        await audit_system("AUTO_REPAIR", "fan", name, reason=reason)
     except Exception as err:
         print(f"[PREEMPTIVE MAINTENANCE ERROR] Fan {name}: {err}")
         await audit_system("AUTO_REPAIR", "fan", name, success=False, error=str(err)[:200])
+        component_health[name] = previous_health
+    return True
 
 
 async def auto_preemptive_maintenance_worker():
-    print("[MAINTENANCE SCHEDULER] Preventive maintenance worker started.")
+    print("[MAINTENANCE SCHEDULER] Automatic repair worker started.")
     while True:
         try:
-            alarms = await call_simulator_api("list-alarms")
-            if isinstance(alarms, list):
-                for alarm in alarms:
-                    name    = alarm.get("name", "")
-                    problem = str(alarm.get("problem", ""))
-                    if "maintenance" not in problem.lower():
-                        continue
-                    if component_health.get(name, {}).get("under_maintenance"):
-                        continue
-                    if name.startswith("S") or name.startswith("bay") or name.startswith("P"):
-                        await _maintain_spot(name)
-                    elif name.startswith("gate"):
-                        await _maintain_gate(name)
-                    elif name.startswith("f_") or name.startswith("fan"):
-                        await _maintain_fan(name)
-        except Exception:
-            pass
-        # Sync barrier health from simulator
+            await maintenance_scan_once()
+        except Exception as exc:
+            print(f"[MAINTENANCE SCHEDULER ERROR] {exc}")
+        await asyncio.sleep(MAINTENANCE_SCAN_SECONDS)
+
+
+async def maintenance_scan_once():
+    """Use simulator health and alarms to repair idle gates, spots, and fans once per cooldown."""
+    fresh: set[str] = set()
+    for endpoint, details in (
+        ("list-barriers", barrier_states),
+        ("list-parking-spots", spot_details),
+        ("list-exhaust-fans", fan_details),
+    ):
         try:
-            barriers = await call_simulator_api("list-barriers")
-            if isinstance(barriers, list):
-                for b in barriers:
-                    n = b.get("name")
-                    if n:
-                        component_health[n] = {
-                            "broken":            b.get("broken", False),
-                            "under_maintenance": b.get("isUnderMaintenance", False),
-                        }
-        except Exception:
-            pass
-        # Recover repaired spots
-        try:
-            spots_list = await call_simulator_api("list-parking-spots")
-            if isinstance(spots_list, list):
-                for s in spots_list:
-                    s_name = s.get("name")
-                    if not s_name or s_name not in component_health:
-                        continue
-                    if not s.get("isUnderMaintenance", False) and not s.get("broken", False):
-                        component_health.pop(s_name, None)
-                        if not s.get("isOccupied", False):
-                            async with spot_lock:
-                                parking_spots[s_name] = True
-        except Exception:
-            pass
-        await asyncio.sleep(5.0)
+            items = await call_simulator_api(endpoint)
+        except Exception as exc:
+            print(f"[MAINTENANCE] Could not read {endpoint}: {exc}")
+            continue
+        if not isinstance(items, list):
+            continue
+        fresh.add(endpoint)
+        for item in items:
+            name = item.get("name") if isinstance(item, dict) else None
+            if not name:
+                continue
+            if endpoint == "list-barriers":
+                details[name] = item.get("state", "")
+            else:
+                details[name] = item
+            if endpoint in ("list-barriers", "list-exhaust-fans") or (endpoint == "list-parking-spots" and name in parking_spots):
+                usage_cycles[name] = {
+                    "cycles": item.get("usageCycles", item.get("cycleCount", 0)),
+                    "last_updated": time.time(),
+                    "type": {"list-barriers": "gate", "list-exhaust-fans": "fan", "list-parking-spots": "spot"}[endpoint],
+                }
+            if item.get("broken") or item.get("isUnderMaintenance") or name in component_health:
+                component_health[name] = {
+                    "broken": bool(item.get("broken")),
+                    "under_maintenance": bool(item.get("isUnderMaintenance")),
+                }
+            if (endpoint == "list-parking-spots" and name in parking_spots
+                    and name in component_health):
+                occupied = item.get("isOccupied", False) or bool(item.get("detectedCars"))
+                async with spot_lock:
+                    assigned = any(car.get("assigned_spot") == name for car in active_cars.values())
+                    parking_spots[name] = not (occupied or assigned or item.get("broken") or item.get("isUnderMaintenance"))
+
+    candidates = {name: "component failure" for name, health in component_health.items() if health.get("broken")}
+    try:
+        alarms = await call_simulator_api("list-alarms")
+    except Exception as exc:
+        print(f"[MAINTENANCE] Could not read alarms: {exc}")
+        alarms = []
+    if isinstance(alarms, list):
+        for alarm in alarms:
+            if not isinstance(alarm, dict):
+                continue
+            name = alarm.get("name") or alarm.get("Name")
+            problem = str(alarm.get("problem") or alarm.get("Problem") or "")
+            if name and any(word in problem.lower() for word in ("maintenance", "broken", "failure", "repair", "usage", "cycle")):
+                candidates[name] = problem
+
+    for name, reason in sorted(candidates.items()):
+        if component_health.get(name, {}).get("under_maintenance") or has_manual_override(name):
+            continue
+        if time.monotonic() - repair_attempts.get(name, float("-inf")) < REPAIR_RETRY_SECONDS:
+            continue
+        attempted = False
+        if name in parking_spots and "list-parking-spots" in fresh:
+            attempted = await _maintain_spot(name, reason)
+        elif name in ALL_GATES and "list-barriers" in fresh:
+            attempted = await _maintain_gate(name, reason)
+        elif (name in fan_details or name.lower().startswith(("fan", "f_"))) and "list-exhaust-fans" in fresh:
+            attempted = await _maintain_fan(name, reason)
+        # The simulator has no lights/{name}/repair endpoint.
+        if attempted:
+            repair_attempts[name] = time.monotonic()
 
 
 # -------------------------------------------------

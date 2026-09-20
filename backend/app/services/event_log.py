@@ -136,12 +136,14 @@ def financial_summary(db: Session, day: date) -> dict:
     parking_revenue = parking_revenue or ZERO
     charging_revenue = charging_revenue or ZERO
     penalty_total = penalties["total_fine"] or ZERO
+    gross_revenue = parking_revenue + charging_revenue
     return {
         "date": day,
         "parking_revenue": parking_revenue,
         "ev_charging_revenue": charging_revenue,
         "penalty_cost": penalty_total,
-        "total_revenue": parking_revenue + charging_revenue,
+        "total_revenue": gross_revenue,
+        "net_revenue": gross_revenue - penalty_total,
         "parking_transactions": parking_transactions,
         "charging_transactions": charging_transactions or 0,
         "penalty_transactions": penalties["count"],

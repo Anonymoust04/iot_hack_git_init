@@ -500,6 +500,7 @@ export async function getFinancialReport(date) {
     evChargingRevenue: Number(report.ev_charging_revenue) || 0,
     penaltyCost: Number(report.penalty_cost) || 0,
     totalRevenue: Number(report.total_revenue) || 0,
+    netRevenue: Number(report.net_revenue) || 0,
     breakdown: (report.breakdown || []).map((row) => ({
       category: row.category,
       transactions: row.transactions,

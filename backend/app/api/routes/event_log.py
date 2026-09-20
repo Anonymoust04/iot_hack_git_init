@@ -52,6 +52,7 @@ class FinancialSummaryOut(BaseModel):
     ev_charging_revenue: Decimal
     penalty_cost: Decimal
     total_revenue: Decimal
+    net_revenue: Decimal
     parking_transactions: int
     charging_transactions: int
     penalty_transactions: int

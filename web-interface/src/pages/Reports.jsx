@@ -19,6 +19,7 @@ const financialMetrics = [
   ["EV Extra Fees", "evChargingRevenue"],
   ["Penalty Cost", "penaltyCost"],
   ["Gross Revenue", "totalRevenue"],
+  ["Net After Penalties", "netRevenue"],
 ];
 
 function localToday() {
@@ -126,7 +127,7 @@ function Reports() {
           </section>
           <section className="reports-panel">
             <h2>Financial Breakdown</h2>
-            <p className="reports-note">Electric cars pay the parking fee plus an equal EV fee. Penalties are costs and are excluded from gross revenue.</p>
+            <p className="reports-note">Gross revenue = parking fees + EV extra fees. Net revenue = gross revenue − penalty cost.</p>
             {hasFinancialActivity ? (
               <div className="reports-table-scroll"><table className="reports-table">
                 <thead><tr><th>CATEGORY</th><th>TRANSACTIONS</th><th>AMOUNT</th></tr></thead>
