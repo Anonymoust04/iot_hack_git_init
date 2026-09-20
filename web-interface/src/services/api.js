@@ -475,7 +475,7 @@ export async function getDailyReport(date) {
   return {
     vehiclesEntered: summary.cars_arrived,
     vehiclesExited: summary.cars_departed,
-    peakOccupancy: '—', // not recorded yet
+    peakOccupancy: summary.peak_occupancy ?? '—',   // most cars parked at once that day
     currentOccupancy: occupied ?? 'Unavailable',
     operationalAlerts: summary.co_alerts,
     componentFailures: summary.components_broken,
@@ -493,7 +493,19 @@ export async function getDailyReport(date) {
 }
 
 export async function getFinancialReport(date) {
-  return await request(`/api/logs/financial-summary?day=${encodeURIComponent(date)}`);
+  // Needs the FINANCIAL_REPORTS authority; the backend answers 403 otherwise.
+  const report = await request(`/api/logs/financial-summary?day=${encodeURIComponent(date)}`);
+  return {
+    parkingRevenue: Number(report.parking_revenue) || 0,
+    evChargingRevenue: Number(report.ev_charging_revenue) || 0,
+    penaltyCost: Number(report.penalty_cost) || 0,
+    totalRevenue: Number(report.total_revenue) || 0,
+    breakdown: (report.breakdown || []).map((row) => ({
+      category: row.category,
+      transactions: row.transactions,
+      amount: Number(row.amount) || 0,
+    })),
+  };
 }
 
 export async function chargeCar(plateNumber, parkingCost = 0.0, chargingCost = 0.0) {

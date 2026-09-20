@@ -15,10 +15,10 @@ const dailyMetrics = [
 ];
 
 const financialMetrics = [
-  ["Parking Revenue", "parkingRevenue"],
-  ["EV Charging Revenue", "evChargingRevenue"],
+  ["Parking Fees", "parkingRevenue"],
+  ["EV Extra Fees", "evChargingRevenue"],
   ["Penalty Cost", "penaltyCost"],
-  ["Total Revenue", "totalRevenue"],
+  ["Gross Revenue", "totalRevenue"],
 ];
 
 function localToday() {
@@ -26,14 +26,6 @@ function localToday() {
   const month = String(now.getMonth() + 1).padStart(2, "0");
   const day = String(now.getDate()).padStart(2, "0");
   return `${now.getFullYear()}-${month}-${day}`;
-}
-
-function storedRole() {
-  try {
-    return JSON.parse(localStorage.getItem("currentUser") || "null")?.role?.toUpperCase() || "";
-  } catch {
-    return "";
-  }
 }
 
 function money(value) {
@@ -55,24 +47,36 @@ function Reports() {
   const [date, setDate] = useState(localToday);
   const [dailyReport, setDailyReport] = useState(null);
   const [financialReport, setFinancialReport] = useState(null);
-  const isAdmin = storedRole() === "ADMIN";
+  const [error, setError] = useState(null);
+  const [loadedKey, setLoadedKey] = useState(null);
+  const requestKey = `${tab}:${date}`;
+  const loading = Boolean(date && loadedKey !== requestKey);
 
   useEffect(() => {
     let active = true;
+    if (!date) return () => { active = false; };
     if (tab === "daily") {
       getDailyReport(date)
-        .then((report) => { if (active) setDailyReport(report || null); })
-        .catch(() => { if (active) setDailyReport(null); });
-    } else if (isAdmin) {
+        .then((report) => { if (active) { setDailyReport(report || null); setError(null); } })
+        .catch((err) => { if (active) { setDailyReport(null); setError(err.message); } })
+        .finally(() => { if (active) setLoadedKey(requestKey); });
+    } else {
       getFinancialReport(date)
-        .then((report) => { if (active) setFinancialReport(report || null); })
-        .catch(() => { if (active) setFinancialReport(null); });
+        .then((report) => { if (active) { setFinancialReport(report || null); setError(null); } })
+        .catch((err) => {
+          if (!active) return;
+          setFinancialReport(null);
+          // 403 = the account lacks the FINANCIAL_REPORTS authority
+          setError(/403|forbidden|permission/i.test(err.message) ? "You do not have the financial report permission." : err.message);
+        })
+        .finally(() => { if (active) setLoadedKey(requestKey); });
     }
     return () => { active = false; };
-  }, [date, tab, isAdmin]);
+  }, [date, tab, requestKey]);
 
   const dailyEvents = Array.isArray(dailyReport?.events) ? dailyReport.events : [];
   const financialRows = Array.isArray(financialReport?.breakdown) ? financialReport.breakdown : [];
+  const hasFinancialActivity = financialRows.some((row) => Number(row.transactions) > 0);
 
   return (
     <div className="reports-page">
@@ -82,12 +86,10 @@ function Reports() {
       </header>
 
       <div className="reports-toolbar">
-        <label className="reports-date">Date <input type="date" value={date} onChange={(event) => { setDailyReport(null); setFinancialReport(null); setDate(event.target.value); }} /></label>
+        <label className="reports-date">Report date <input type="date" value={date} onChange={(event) => { setDailyReport(null); setFinancialReport(null); setError(null); setDate(event.target.value); }} /></label>
       </div>
 
-      {tab === "financial" && !isAdmin ? (
-        <div className="reports-panel reports-access">Financial reports require Admin access.</div>
-      ) : tab === "daily" ? (
+      {tab === "daily" ? (
         <>
           <section className="reports-summary" aria-label="Daily operations summary">
             {dailyMetrics.map(([label, field]) => (
@@ -109,11 +111,14 @@ function Reports() {
                   </tr>
                 ))}</tbody>
               </table></div>
-            ) : <p className="reports-empty" style={date === localToday() ? { textAlign: "center" } : undefined}>{date === localToday() ? "No operational report data available for today" : "No operational report data available for selected date"}</p>}
+            ) : <p className="reports-empty" style={date === localToday() ? { textAlign: "center" } : undefined}>{error || (date === localToday() ? "No operational report data available for today" : "No operational report data available for selected date")}</p>}
           </section>
         </>
       ) : (
         <>
+          {loading && <p className="reports-empty" role="status">Loading financial report…</p>}
+          {!loading && error && <div className="reports-panel reports-access" role="alert">{error}</div>}
+          {!loading && !error && financialReport && <>
           <section className="reports-summary" aria-label="Financial summary">
             {financialMetrics.map(([label, field]) => (
               <div className="reports-summary-card" key={field}><span>{label}</span><strong>{money(financialReport?.[field])}</strong></div>
@@ -121,15 +126,17 @@ function Reports() {
           </section>
           <section className="reports-panel">
             <h2>Financial Breakdown</h2>
-            {financialRows.length ? (
+            <p className="reports-note">Electric cars pay the parking fee plus an equal EV fee. Penalties are costs and are excluded from gross revenue.</p>
+            {hasFinancialActivity ? (
               <div className="reports-table-scroll"><table className="reports-table">
                 <thead><tr><th>CATEGORY</th><th>TRANSACTIONS</th><th>AMOUNT</th></tr></thead>
                 <tbody>{financialRows.map((row, index) => (
                   <tr key={row.category ?? index}><td>{row.category ?? "—"}</td><td>{row.transactions ?? "—"}</td><td>{money(row.amount)}</td></tr>
                 ))}</tbody>
               </table></div>
-            ) : <p className="reports-empty">No financial report data available</p>}
+            ) : <p className="reports-empty">No paid charges or penalties for this date.</p>}
           </section>
+          </>}
         </>
       )}
     </div>

@@ -35,21 +35,27 @@ observed or exercised; it does not mean every failure-mode requirement is comple
   while dropping `user_permissions`; this is an environment failure, not a passing test result.
 - [ ] Earlier integration tests still need repair: gate role inference, webhook response `queued` versus `dispatched`,
   and the gate-operability fixture/safety path.
+- [ ] The running Uvicorn process is stale: live direct simulator endpoints still returned `200` without a token.
+  Restart Uvicorn before validating the new source-level RBAC behavior.
 
 ### Still not complete
 
-- [ ] Strict signed-only webhook enforcement: `webhook_require_signature` still defaults to `False`, so missing
-  signatures are accepted by default.
+- [x] Strict signed-only webhook enforcement: missing signatures are rejected and logged as `WEBHOOK_UNSIGNED`; invalid
+  signatures are logged as `WEBHOOK_BAD_SIGNATURE`. Focused recovery/webhook tests pass.
 - [ ] Audit call-site integration for gate/control/repair actions, user changes, fan/light actions, and automation.
 - [x] Financial report backend and frontend integration: `/api/logs/financial-summary` reads paid parking sessions
   and penalty events from the database; the Reports page requests it for the selected date. Covered by
   `backend/tests/test_financial_report.py`.
 - [ ] Usage-cycle monitoring for parking spots, durable cycle history, and threshold-based maintenance scheduling.
 - [ ] Complete failure recovery for every component type, including durable maintenance state and repair outcomes.
-- [ ] Complete RBAC protection for simulator routes in `main.py`, especially direct movement, charging, and component routes.
+- [x] Source-level RBAC protection for direct simulator routes in `main.py`: gate, light, fan, spot repair, car movement,
+  and charging routes use the existing permission dependencies. Live verification remains pending until Uvicorn restarts.
 - [ ] Frontend permission-based hiding/enforcement using effective per-user permissions rather than only local role checks.
-- [ ] Complete manual-parking recovery: identify/register a car that entered without gate/spot events, estimate its
-  duration, charge it once, free the occupied spot, record the events, and route it safely through an exit.
+- [x] Manual-parking recovery: a real exit with no recorded arrival/spot event creates an idempotent `PARKED` database
+  session, records `MANUAL_PARK_RECOVERED`, estimates duration, and charges once. Cars sent to `leavepark` because the
+  lot is full still bypass this recovery and are not charged. Focused recovery tests pass.
+- [x] Human device overrides: manual gate/light/fan/repair actions are tracked process-wide and automation skips those
+  devices, so CO/light/maintenance automation does not overwrite an operator command.
 - [ ] Complete live validation of dynamic financial and operational reporting with populated production-like data.
 
 ### Recommended next checks
@@ -62,6 +68,8 @@ observed or exercised; it does not mean every failure-mode requirement is comple
   and returned component state.
 - [ ] Send one missing-signature and one invalid-signature webhook, confirming both are rejected and logged.
 - [ ] Run the manual-parked-car scenario end to end and verify no duplicate charge or stale occupied spot remains.
+- [ ] Restart Uvicorn, then verify unauthenticated direct simulator controls return `401` and authorized controls return
+  the simulator response.
 
 ## Progress checklist
 

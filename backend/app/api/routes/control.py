@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from app.api.deps import AdminUser, DbSession, FanControlUser, GateControlUser, LightControlUser, OperatorUser, RepairUser
 from app.models import GateState
 from app.services.audit import audited
+from app.services.device_overrides import set_manual_override
 from app.services.components import set_gate_state
 from app.services.login_attempts import client_ip
 from app.services.simulator_client import get_simulator
@@ -39,6 +40,7 @@ def gate_action(name: str, action: Literal["open", "close", "repair"], request: 
     sim = get_simulator()
     with _audit(db, request, user, f"GATE_{action.upper()}", "gate", name):
         _simulator_call({"open": sim.open_gate, "close": sim.close_gate, "repair": sim.repair_gate}[action], name)
+    set_manual_override(name)
     # Show the movement at once; the simulator's gate_action webhook (and the periodic sync)
     # then records the final Open / Closed.
     moving = {"open": GateState.OPENING, "close": GateState.CLOSING}.get(action)
@@ -65,6 +67,7 @@ def repair_spot(name: str, request: Request, db: DbSession, user: RepairUser):
 def light_action(name: str, action: Literal["on", "off"], request: Request, db: DbSession, user: LightControlUser):
     with _audit(db, request, user, f"LIGHT_{action.upper()}", "light", name):
         _simulator_call(get_simulator().light, name, action == "on")
+    set_manual_override(name)
     return {"light": name, "action": action}
 
 
@@ -73,6 +76,7 @@ def light_group_action(group: str, action: Literal["on", "off"], request: Reques
                        user: LightControlUser):
     with _audit(db, request, user, f"LIGHT_GROUP_{action.upper()}", "light", group):
         _simulator_call(get_simulator().light_group, group, action == "on")
+    set_manual_override(f"group:{group}")
     return {"group": group, "action": action}
 
 
@@ -85,6 +89,7 @@ def fan_action(name: str, action: Literal["on", "off", "repair"], request: Reque
             _simulator_call(simulator.repair_fan, name)
         else:
             _simulator_call(simulator.fan, name, action == "on")
+    set_manual_override(name)
     return {"fan": name, "action": action}
 
 

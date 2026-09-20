@@ -313,6 +313,84 @@ def record_charge(db: Session, plate: str, is_electric: bool, at: datetime | Non
 
 
 @retry_on_deadlock
+def store_charge(db: Session, plate: str, parking_cost: float, charging_cost: float,
+                 minutes: float | None = None, at: datetime | None = None,
+                 car_type: CarType | None = None) -> None:
+    """Save what the simulator accepted for this car, so the financial report has real numbers.
+    main.py works out the amounts and charges the car; this only records them.
+    The simulator accepting the charge is the payment, so the visit is marked PAID."""
+    try:
+        now = at or utcnow()
+        session = active_session(db, plate, lock=True)
+        if session is None:
+            # The exit webhook can complete the visit before the asynchronous
+            # charge writer runs. Attach the fee to that visit, not a new one.
+            session = db.scalars(
+                select(ParkingSession)
+                .where(
+                    ParkingSession.car_plate == plate,
+                    ParkingSession.status == SessionStatus.COMPLETED,
+                    ParkingSession.exit_time >= now,
+                    ParkingSession.exit_time <= now + timedelta(hours=1),
+                )
+                .order_by(ParkingSession.id.desc()).limit(1).with_for_update()
+            ).first()
+        if session is None:  # e.g. the arrival webhook was missed: keep the money, not the car's history
+            entry = now - timedelta(minutes=minutes) if minutes else now
+            session = ParkingSession(car_plate=plate, car_type=car_type, entry_time=entry)
+            db.add(session)
+        if session.parking_cost is not None:
+            db.commit()   # already recorded (duplicate exit event): never double-count revenue
+            return
+        session.parking_cost = Decimal(str(round(float(parking_cost), 2)))
+        session.charging_cost = Decimal(str(round(float(charging_cost), 2)))
+        if session.car_type is None:
+            session.car_type = car_type
+        # This column is the billing end time. The exit webhook may have set it
+        # first, but the report must use the simulator charge date.
+        session.exit_time = now
+        session.payment_status = PaymentStatus.PAID
+        session.status = SessionStatus.EXITING if session.status != SessionStatus.COMPLETED else session.status
+        log_event(db, "CAR_CHARGED", car_plate=plate,
+                  raw_data={"parking_cost": float(parking_cost), "charging_cost": float(charging_cost),
+                            "minutes": minutes})
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+@retry_on_deadlock
+def recover_manual_parking(db: Session, plate: str, duration_minutes: float,
+                           car_type: CarType | None = None,
+                           at: datetime | None = None, raw_data: dict | None = None) -> bool:
+    """Create a PARKED visit when a real exit has no entry/spot events.
+
+    A car sent to ``leavepark`` because the lot is full never reaches this
+    function and is therefore never charged.
+    """
+    try:
+        if active_session(db, plate, lock=True) is not None:
+            db.commit()
+            return False
+        now = at or utcnow()
+        entry = now - timedelta(minutes=max(1.0, float(duration_minutes or 1)))
+        db.add(ParkingSession(
+            car_plate=plate,
+            car_type=car_type,
+            entry_time=entry,
+            parked_time=entry,
+            status=SessionStatus.PARKED,
+        ))
+        log_event(db, "MANUAL_PARK_RECOVERED", car_plate=plate, raw_data=raw_data)
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+
+
+@retry_on_deadlock
 def record_payment(db: Session, plate: str, amount: Decimal, raw_data: dict | None = None) -> str | None:
     """Validate a payment the simulator says a driver made. Some payments are FAKE, so it is
     accepted only if it matches what WE charged this car, and only once.

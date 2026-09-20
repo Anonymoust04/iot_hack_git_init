@@ -3,7 +3,7 @@
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import Numeric, case, cast, func, select
+from sqlalchemy import Numeric, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import ParkingSession, PaymentStatus
@@ -47,6 +47,28 @@ def search_events(
     return db.scalars(query.order_by(Event.event_time.desc(), Event.id.desc()).limit(limit).offset(offset)).all()
 
 
+def peak_occupancy(db: Session, day: date) -> int:
+    """Most cars parked at the same moment during the UTC day, from the visits themselves:
+    +1 when a car parks, -1 when it leaves (a visit still open counts until the end of the day)."""
+    start = datetime.combine(day, time.min)
+    end = start + timedelta(days=1)
+    rows = db.execute(
+        select(ParkingSession.parked_time, ParkingSession.exit_time)
+        .where(ParkingSession.parked_time.is_not(None), ParkingSession.parked_time < end)
+        .where(or_(ParkingSession.exit_time.is_(None), ParkingSession.exit_time >= start))
+    ).all()
+    moments: list[tuple[datetime, int]] = []
+    for parked_at, left_at in rows:
+        moments.append((max(parked_at, start), 1))
+        if left_at is not None and left_at < end:
+            moments.append((max(left_at, start), -1))
+    peak = parked = 0
+    for _, change in sorted(moments, key=lambda m: (m[0], m[1])):
+        parked += change
+        peak = max(peak, parked)
+    return peak
+
+
 def daily_summary(db: Session, day: date) -> dict:
     """Count event types and arrival hours with one grouped query over a UTC day."""
     start = datetime.combine(day, time.min)
@@ -88,6 +110,7 @@ def daily_summary(db: Session, day: date) -> dict:
         "components_fixed": counts.get("COMPONENT_FIXED", 0),
         "co_alerts": counts.get("CO_ALERT", 0),
         "busiest_hour": busiest_hour,
+        "peak_occupancy": peak_occupancy(db, day),
         "events_by_type": dict(sorted(counts.items())),
     }
 
@@ -104,6 +127,7 @@ def financial_summary(db: Session, day: date) -> dict:
             func.sum(case((ParkingSession.charging_cost > ZERO, 1), else_=0)),
         ).where(
             ParkingSession.payment_status == PaymentStatus.PAID,
+            ParkingSession.parking_cost.is_not(None),
             ParkingSession.exit_time >= start,
             ParkingSession.exit_time < end,
         )

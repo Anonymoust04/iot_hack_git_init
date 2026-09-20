@@ -22,8 +22,9 @@ import asyncio
 import math
 import time
 from datetime import datetime
+from typing import Annotated
 from pydantic import BaseModel
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 import httpx
 
 app = FastAPI(title="Parking Simulator Backend - Level 2")
@@ -35,13 +36,16 @@ from pathlib import Path
 _backend_dir = str(Path(__file__).resolve().parents[1])
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
-try:
-    from app.config import get_settings
-except Exception:
-    class DummySettings:
-        sim_timeout_seconds = 10.0
-    def get_settings():
-        return DummySettings()
+from app.api.deps import CurrentUser, require_permission
+from app.config import get_settings
+from app.core.permissions import Permission
+from app.models import User
+from app.services.device_overrides import has_manual_override, set_manual_override
+
+GateControlDependency = Annotated[User, Depends(require_permission(Permission.GATE_CONTROL))]
+LightControlDependency = Annotated[User, Depends(require_permission(Permission.LIGHT_CONTROL))]
+FanControlDependency = Annotated[User, Depends(require_permission(Permission.FAN_CONTROL))]
+RepairDependency = Annotated[User, Depends(require_permission(Permission.REPAIR))]
 
 db_hook.setup(app)
 
@@ -291,6 +295,8 @@ async def auto_close_gate_after_delay(gate_name: str, delay: float = 1.0):
     try:
         q = gate_queues.get(gate_name)
         if q is None or q.empty():
+            if has_manual_override(gate_name):
+                return
             await api_close_barrier_gate(gate_name)
     except Exception as e:
         print(f"[AUTOMATION ERROR] Close {gate_name}: {e}")
@@ -447,6 +453,47 @@ def co_needs_ventilation(risk: str | None, ppm: float | None) -> bool:
     return rated_high or measured_high
 
 
+async def store_charge_async(plate: str, parking_cost: float, charging_cost: float,
+                             minutes: float, car_type: str, charged_at: datetime | None):
+    """Record an accepted charge in MySQL so the financial report is real (never blocks the exit)."""
+    def run():
+        from app.db.session import SessionLocal
+        from app.models import CarType
+        from app.services.parking import store_charge
+        with SessionLocal() as db:
+            vehicle_type = {
+                "Electric": CarType.ELECTRIC,
+                "Accessible": CarType.ACCESSIBLE,
+            }.get(car_type, CarType.ANY)
+            store_charge(db, plate, parking_cost, charging_cost, minutes=minutes,
+                         at=charged_at, car_type=vehicle_type)
+    try:
+        await asyncio.to_thread(run)
+    except Exception as e:
+        print(f"[BILLING] charge for {plate} not saved: {e}")
+
+
+async def recover_manual_parking_async(plate: str, duration: float, raw_data: dict, car_type: str,
+                                       at: datetime | None):
+    """Persist a sensor-less visit before charging a car at a real exit."""
+    def run():
+        from app.db.session import SessionLocal
+        from app.models import CarType
+        from app.services.parking import recover_manual_parking
+        vehicle_type = {
+            "Electric": CarType.ELECTRIC,
+            "Accessible": CarType.ACCESSIBLE,
+        }.get(car_type, CarType.ANY)
+        with SessionLocal() as db:
+            return recover_manual_parking(db, plate, duration, car_type=vehicle_type,
+                                          at=at, raw_data=raw_data)
+    try:
+        return await asyncio.to_thread(run)
+    except Exception as e:
+        print(f"[PARKING RECOVERY] visit for {plate} not saved: {e}")
+        return False
+
+
 async def audit_system(action: str, target_type: str, target_name: str, success: bool = True, **details):
     """Audit log entry for something the system did by itself (no operator): actor stays empty."""
     try:
@@ -482,6 +529,7 @@ async def ventilate_zone(zone_name: str, on: bool, risk=None, ppm=None):
             and not f.get("isUnderMaintenance", False)
             and f.get("name")
             and await is_component_operable(f["name"])
+            and not has_manual_override(f["name"])
         ]
         zone_fans = [f.get("name") for f in fans if str(f.get("zoneParent") or "").upper() == zone_name.upper()]
         if not target:
@@ -559,7 +607,7 @@ async def auto_light_controller_worker():
             if isinstance(lights, list):
                 for light in lights:
                     name = light.get("name")
-                    if not name or light.get("broken") or light.get("isUnderMaintenance"):
+                    if not name or light.get("broken") or light.get("isUnderMaintenance") or has_manual_override(name):
                         continue
                     currently_on = light.get("isOn", False)
                     if is_night and not currently_on:
@@ -605,7 +653,7 @@ async def _maintain_spot(name: str):
     async with spot_lock:
         is_free     = parking_spots.get(name, True)
         is_assigned = any(info.get("assigned_spot") == name for info in active_cars.values())
-    if not is_free or is_assigned:
+    if not is_free or is_assigned or has_manual_override(name):
         return
     print(f"[PREEMPTIVE MAINTENANCE] Spot {name} IDLE - repairing...")
     async with spot_lock:
@@ -622,7 +670,7 @@ async def _maintain_spot(name: str):
 
 async def _maintain_gate(name: str):
     q = gate_queues.get(name)
-    if not q or not q.empty():
+    if not q or not q.empty() or has_manual_override(name):
         return
     print(f"[PREEMPTIVE MAINTENANCE] Gate {name} IDLE - repairing...")
     component_health[name] = {"broken": False, "under_maintenance": True}
@@ -635,6 +683,8 @@ async def _maintain_gate(name: str):
 
 
 async def _maintain_fan(name: str):
+    if has_manual_override(name):
+        return
     print(f"[PREEMPTIVE MAINTENANCE] Fan {name} - turning off and repairing...")
     component_health[name] = {"broken": False, "under_maintenance": True}
     try:
@@ -889,7 +939,24 @@ async def process_car_exit(data: dict):
 
     print(f"[EXIT] {car_plate} ({norm_type}) at {spot_name}.")
 
-    duration = float(car_info.get("planned_duration", 0) or 0)
+    charge_at = None
+    try:
+        charge_at = datetime.strptime(str(server_time), "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        pass
+
+    # Bill elapsed simulator time when both timestamps exist. Planned duration
+    # is only a fallback when the entry webhook was missed.
+    duration = 0.0
+    entry_t = car_info.get("entry_time")
+    if entry_t and charge_at:
+        try:
+            entry_at = datetime.strptime(str(entry_t), "%Y-%m-%d %H:%M:%S")
+            duration = max(1, math.ceil((charge_at - entry_at).total_seconds() / 60))
+        except (TypeError, ValueError):
+            pass
+    if duration <= 0:
+        duration = float(car_info.get("planned_duration", 0) or 0)
     if duration <= 0:
         for evt in reversed(webhook_events):
             p = evt.get("CarPlateNumber") or evt.get("CarPlate") or evt.get("car_plate")
@@ -898,28 +965,25 @@ async def process_car_exit(data: dict):
                 if d > 0:
                     duration = d; break
     if duration <= 0:
-        entry_t = car_info.get("entry_time")
-        if entry_t and server_time:
-            try:
-                fmt = "%Y-%m-%d %H:%M:%S"
-                duration = max(1, math.ceil(
-                    (datetime.strptime(str(server_time), fmt) -
-                     datetime.strptime(str(entry_t), fmt)).total_seconds() / 60))
-            except Exception:
-                pass
-    if duration <= 0:
         duration = 1.0
+    car_info = active_cars.get(car_plate, {})
+    if not car_info:
+        await recover_manual_parking_async(car_plate, duration, data, raw_type, charge_at)
+        car_info = {"car_type": raw_type, "planned_duration": duration}
 
     exit_gate  = exit_gate_for_spot(spot_name)
     payment_ok = car_plate in charged_cars
 
     if not payment_ok:
-        parking_cost  = float(max(1, round(duration)))
-        charging_cost = float(parking_cost * 2.0) if is_ev else 0.0
+        parking_cost  = float(max(1, math.ceil(duration)))
+        charging_cost = parking_cost if is_ev else 0.0
         print(f"[EXIT] Charging {car_plate}: parking=${parking_cost}, EV=${charging_cost}")
         try:
             await api_charge_car(car_plate, parking_cost, charging_cost)
             charged_cars.add(car_plate)
+            asyncio.create_task(store_charge_async(
+                car_plate, parking_cost, charging_cost, duration, norm_type, charge_at,
+            ))
             if car_plate in active_cars:
                 active_cars[car_plate]["charged"] = True
             payment_ok = True
@@ -1435,113 +1499,77 @@ async def test():
 # -------------------------------------------------
 
 @app.post("/barrier-gates/{name}/open")
-async def open_barrier_gate(name: str):
+async def open_barrier_gate(name: str, _: GateControlDependency):
+    set_manual_override(name)
     return await api_open_barrier_gate(name)
 
+
 @app.post("/barrier-gates/{name}/close")
-async def close_barrier_gate(name: str):
+async def close_barrier_gate(name: str, _: GateControlDependency):
+    set_manual_override(name)
     return await api_close_barrier_gate(name)
 
+
 @app.post("/barrier-gates/{name}/repair")
-async def repair_barrier_gate(name: str):
+async def repair_barrier_gate(name: str, _: RepairDependency):
+    set_manual_override(name)
     return await call_simulator_api(f"barrier-gates/{name}/repair", method="POST")
 
+
 @app.post("/lights/{name}/on")
-async def turn_on_light(name: str):
+async def turn_on_light(name: str, _: LightControlDependency):
+    set_manual_override(name)
     return await call_simulator_api(f"lights/{name}/on", method="POST")
 
+
 @app.post("/lights/{name}/off")
-async def turn_off_light(name: str):
+async def turn_off_light(name: str, _: LightControlDependency):
+    set_manual_override(name)
     return await call_simulator_api(f"lights/{name}/off", method="POST")
 
+
 @app.post("/lights/group/{name}/on")
-async def turn_on_light_group(name: str):
+async def turn_on_light_group(name: str, _: LightControlDependency):
+    set_manual_override(f"group:{name}")
     return await call_simulator_api(f"lights/group/{name}/on", method="POST")
 
+
 @app.post("/lights/group/{name}/off")
-async def turn_off_light_group(name: str):
+async def turn_off_light_group(name: str, _: LightControlDependency):
+    set_manual_override(f"group:{name}")
     return await call_simulator_api(f"lights/group/{name}/off", method="POST")
 
+
 @app.post("/exhaust-fans/{name}/repair")
-async def repair_exhaust_fan(name: str):
+async def repair_exhaust_fan(name: str, _: RepairDependency):
+    set_manual_override(name)
     return await call_simulator_api(f"exhaust-fans/{name}/repair", method="POST")
 
-@app.post("/exhaust-fans/{name}/on")
-async def turn_on_exhaust_fan(name: str):
-    return await call_simulator_api(f"exhaust-fans/{name}/on", method="POST")
-
-@app.post("/exhaust-fans/{name}/off")
-async def turn_off_exhaust_fan(name: str):
-    return await call_simulator_api(f"exhaust-fans/{name}/off", method="POST")
-
-@app.post("/parking-spots/{name}/repair")
-async def repair_parking_spot(name: str):
-    return await call_simulator_api(f"parking-spots/{name}/repair", method="POST")
-
-@app.post("/car/{name}/goto/{destination}")
-async def car_goto(name: str, destination: str):
-    return await api_send_car_to_destination(name, destination)
-
-@app.post("/car/{name}/charge")
-async def car_charge(name: str, parking_cost: float = 0.0, charging_cost: float = 0.0):
-    return await api_charge_car(name, parking_cost, charging_cost)
 
 @app.post("/exhaust-fans/{name}/on")
-async def turn_on_exhaust_fan(name: str):
-    """Turn on an exhaust fan by name."""
+async def turn_on_exhaust_fan(name: str, _: FanControlDependency):
+    set_manual_override(name)
     return await call_simulator_api(f"exhaust-fans/{name}/on", method="POST")
 
 
 @app.post("/exhaust-fans/{name}/off")
-async def turn_off_exhaust_fan(name: str):
-    """Turn off an exhaust fan by name."""
+async def turn_off_exhaust_fan(name: str, _: FanControlDependency):
+    set_manual_override(name)
     return await call_simulator_api(f"exhaust-fans/{name}/off", method="POST")
 
 
 @app.post("/parking-spots/{name}/repair")
-async def repair_parking_spot(name: str):
-    """Repair a parking spot by name."""
+async def repair_parking_spot(name: str, _: RepairDependency):
+    set_manual_override(name)
     return await call_simulator_api(f"parking-spots/{name}/repair", method="POST")
 
 
 @app.post("/car/{name}/goto/{destination}")
-async def car_goto(name: str, destination: str):
-    """Direct a car to a destination spot."""
+async def car_goto(name: str, _: CurrentUser, destination: str):
     return await api_send_car_to_destination(name, destination)
 
 
 @app.post("/car/{name}/charge")
-async def car_charge(name: str, parking_cost: float = 0.0, charging_cost: float = 0.0):
-    """Charge a car with optional parking and charging cost query parameters."""
-    return await api_charge_car(name, parking_cost, charging_cost)
-
-        
-@app.post("/exhaust-fans/{name}/on")
-async def turn_on_exhaust_fan(name: str):
-    """Turn on an exhaust fan by name."""
-    return await call_simulator_api(f"exhaust-fans/{name}/on", method="POST")
-
-
-@app.post("/exhaust-fans/{name}/off")
-async def turn_off_exhaust_fan(name: str):
-    """Turn off an exhaust fan by name."""
-    return await call_simulator_api(f"exhaust-fans/{name}/off", method="POST")
-
-
-@app.post("/parking-spots/{name}/repair")
-async def repair_parking_spot(name: str):
-    """Repair a parking spot by name."""
-    return await call_simulator_api(f"parking-spots/{name}/repair", method="POST")
-
-
-@app.post("/car/{name}/goto/{destination}")
-async def car_goto(name: str, destination: str):
-    """Direct a car to a destination spot."""
-    return await api_send_car_to_destination(name, destination)
-
-
-@app.post("/car/{name}/charge")
-async def car_charge(name: str, parking_cost: float = 0.0, charging_cost: float = 0.0):
-    """Charge a car with optional parking and charging cost query parameters."""
+async def car_charge(name: str, _: CurrentUser, parking_cost: float = 0.0, charging_cost: float = 0.0):
     return await api_charge_car(name, parking_cost, charging_cost)
         

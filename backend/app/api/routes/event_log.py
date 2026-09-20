@@ -42,6 +42,7 @@ class DailySummaryOut(BaseModel):
     components_fixed: int
     co_alerts: int
     busiest_hour: int | None
+    peak_occupancy: int
     events_by_type: dict[str, int]
 
 

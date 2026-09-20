@@ -106,16 +106,18 @@ def receive(db: Session, body: bytes) -> tuple[dict, str | None]:
         payload = sig_fields = {"raw": payload}
     plate = payload.get("CarPlateNumber")
 
-    # integrity: a wrong signature is always rejected; a missing one only if required
+    # Integrity: both missing and invalid signatures are rejected when verification is enabled.
     settings = get_settings()
     unsigned = sig_fields.get("Signature") in (None, "")
     check = settings.webhook_verify_signature and (settings.webhook_require_signature or not unsigned)
-    if check and not signature_is_valid(sig_fields):
-        log.warning("Bad webhook signature: %s", payload)
+    if check and (unsigned or not signature_is_valid(sig_fields)):
+        reason = "unsigned" if unsigned else "bad signature"
+        log.warning("Rejected %s webhook: %s", reason, payload)
         # no event_id here: a forged copy must not block the real event with the same EventId
-        log_event(db, "WEBHOOK_BAD_SIGNATURE", car_plate=plate, raw_data=payload)
+        log_event(db, "WEBHOOK_UNSIGNED" if unsigned else "WEBHOOK_BAD_SIGNATURE",
+                  car_plate=plate, raw_data=payload)
         db.commit()
-        return payload, "bad signature"
+        return payload, reason
 
     event_id = payload.get("EventId")
     sequence_id = _as_int(payload.get("SequenceId"))

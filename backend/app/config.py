@@ -33,9 +33,9 @@ class Settings(BaseSettings):
     stale_entering_minutes: float = 3
     # Reject webhooks whose MD5 Signature doesn't match (fake payments). Only turn off to debug.
     webhook_verify_signature: bool = True
-    # The simulator currently sends "Signature": null. false: accept unsigned webhooks (a WRONG
-    # signature is still rejected). true: reject unsigned ones too (if a level starts signing).
-    webhook_require_signature: bool = False
+    # Reject unsigned webhooks as well as invalid signatures. Set explicitly to false only when
+    # developing against a simulator build that cannot sign payloads.
+    webhook_require_signature: bool = True
     # Which barriers (GET /list-barriers) are entrances / exits, so the dashboard can label them.
     # Comma-separated. Defaults = the Level 2 park (same as ENTRANCE_GATES / EXIT_GATES in main.py).
     entry_gate: str = "gate1,gate3,gate5"

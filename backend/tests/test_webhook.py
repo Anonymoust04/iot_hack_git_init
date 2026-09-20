@@ -89,12 +89,12 @@ def test_bad_signature_is_stored_but_not_processed(db, client):
     assert db.scalar(select(Gate).where(Gate.name == "gateZ")) is None
 
 
-def test_unsigned_webhook_from_the_simulator_is_processed(db, client):
-    # the real simulator sends "Signature": null
+def test_unsigned_webhook_from_the_simulator_is_rejected_and_logged(db, client):
+    # Strict Level 2 policy: the real simulator must provide a signature.
     client.post("/webhook", json={"EventClass": "gate_action", "Name": "gateU", "Action": "Open",
                                   "EventId": str(uuid.uuid4()), "SequenceId": next(_seq), "Signature": None})
-    wait_until(lambda: db.scalar(select(Gate).where(Gate.name == "gateU")) is not None)
-    assert event_types(db, event_type="WEBHOOK_BAD_SIGNATURE") == []
+    wait_until(lambda: event_types(db, event_type="WEBHOOK_UNSIGNED") == ["WEBHOOK_UNSIGNED"])
+    assert db.scalar(select(Gate).where(Gate.name == "gateU")) is None
 
 
 def test_duplicate_event_id_is_stored_once(db, client):

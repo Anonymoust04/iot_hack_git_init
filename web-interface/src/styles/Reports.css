@@ -109,6 +109,12 @@
   font-size: 21px;
 }
 
+.reports-note {
+  margin: -4px 0 18px;
+  color: #6b7280;
+  font-size: 14px;
+}
+
 .reports-access {
   color: #92400e;
 }
