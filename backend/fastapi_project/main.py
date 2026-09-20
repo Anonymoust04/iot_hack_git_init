@@ -7,7 +7,7 @@ Zones          : Zone 1 -> S1-S30 | Zone 2 -> bay36-bay65 | Zone 3 -> P69-P98
 
 Key behaviours
 --------------
-- Zone 1 fills first, then Zone 2, then Zone 3 (for all vehicle types)
+- Plate-based, queue-aware routing spreads cars across all three zones
 - Vehicle-type-aware spot selection (Electric -> EV spots, Accessible -> Accessible spots)
 - Re-entry guard: rerouted cars arriving at the correct gate are let through immediately
 - Fee charged only after the car has confirmed physically parked (Park/CarIn event)
@@ -21,6 +21,7 @@ Key behaviours
 import asyncio
 import math
 import time
+import zlib
 from datetime import datetime
 from typing import Annotated
 from pydantic import BaseModel
@@ -139,6 +140,8 @@ _token_lock = asyncio.Lock()
 parking_spots: dict[str, bool] = {s: True for s in VALID_PARKING_SPOTS}
 spot_lock = asyncio.Lock()
 gate_queues: dict[str, asyncio.Queue] = {g: asyncio.Queue() for g in ALL_GATES}
+gate_inflight: dict[str, str] = {}  # a gate admits one plate until its EntrySpot CarOut
+exit_inflight: dict[str, str] = {}  # exit gate releases the next car after ExitSpot CarOut
 
 # Physical EntrySpot occupancy. The simulator rejects a second car if it is
 # sent to ENTRY2/ENTRY3 while another car is still sitting there.
@@ -147,6 +150,7 @@ entry_occupied: dict[str, bool] = {
     "ENTRY2": False,
     "ENTRY3": False,
 }
+entry_car: dict[str, str | None] = {entry: None for entry in entry_occupied}
 
 # Per-EntrySpot FIFO queue for cars waiting while the spot is occupied.
 entry_queues: dict[str, asyncio.Queue] = {
@@ -169,6 +173,7 @@ fan_details:      dict[str, dict] = {}
 repair_attempts:  dict[str, float] = {}
 REPAIR_RETRY_SECONDS = 60.0
 MAINTENANCE_SCAN_SECONDS = 15.0
+maintenance_wakeup = asyncio.Event()
 
 _last_sim_hour: int = 12
 
@@ -275,6 +280,8 @@ async def send_car_to_entry_or_queue(car_plate: str, entry_name: str, assigned_s
     async with entry_lock:
         queue = entry_queues[entry_name]
         if entry_occupied[entry_name]:
+            if entry_car.get(entry_name) == car_plate:
+                return {"status": "in_progress", "entry": entry_name}
             pending = list(getattr(queue, "_queue", []))
             if any(item.get("car_plate") == car_plate for item in pending):
                 print(f"[ENTRY WAIT] {entry_name} already queued for {car_plate}; skipping duplicate.")
@@ -283,6 +290,7 @@ async def send_car_to_entry_or_queue(car_plate: str, entry_name: str, assigned_s
             queue.put_nowait({"car_plate": car_plate, "assigned_spot": assigned_spot})
             return {"status": "queued", "entry": entry_name}
         entry_occupied[entry_name] = True
+        entry_car[entry_name] = car_plate
 
     try:
         result = await api_send_car_to_destination(car_plate, entry_name)
@@ -305,7 +313,7 @@ async def auto_close_gate_after_delay(gate_name: str, delay: float = 1.0):
         await asyncio.sleep(delay)
     try:
         q = gate_queues.get(gate_name)
-        if q is None or q.empty():
+        if (q is None or q.empty()) and gate_name not in gate_inflight and gate_name not in exit_inflight:
             if has_manual_override(gate_name):
                 return
             await api_close_barrier_gate(gate_name)
@@ -370,8 +378,17 @@ async def dedicated_entrance_gate_worker(gate_name: str, queue: asyncio.Queue):
         event       = await queue.get()
         car_plate   = event.get("car_plate", "")
         destination = event.get("destination", "leavepark")
-        print(f"[{gate_name.upper()} WORKER] Opening for {car_plate} -> {destination}")
         try:
+            # A second goto while the previous car is still on this EntrySpot
+            # causes simulator overlap. CarOut (or Park/CarIn recovery) releases it.
+            while gate_inflight.get(gate_name):
+                if gate_inflight[gate_name] == car_plate:
+                    break  # duplicate arrival for the same car
+                await asyncio.sleep(0.05)
+            if gate_inflight.get(gate_name) == car_plate:
+                continue
+            gate_inflight[gate_name] = car_plate
+            print(f"[{gate_name.upper()} WORKER] Opening for {car_plate} -> {destination}")
             open_result = await api_open_barrier_gate(gate_name)
 
             if isinstance(open_result, dict) and open_result.get("status") == "blocked":
@@ -379,14 +396,20 @@ async def dedicated_entrance_gate_worker(gate_name: str, queue: asyncio.Queue):
                     f"[{gate_name.upper()} WORKER] Gate blocked for {car_plate}; "
                     f"trying next entrance gate."
                 )
+                gate_inflight.pop(gate_name, None)
                 await _redirect_entrance_car(car_plate, gate_name, destination)
                 continue
 
-            await asyncio.sleep(0.5)
             await api_send_car_to_destination(car_plate, destination)
+            if car_plate in active_cars:
+                active_cars[car_plate]["route_stage"] = "dispatched"
             # The EntrySpot CarOut webhook closes this gate after the car passes.
         except Exception as e:
+            if gate_inflight.get(gate_name) == car_plate:
+                gate_inflight.pop(gate_name, None)
             print(f"[{gate_name.upper()} WORKER ERROR] {car_plate}: {e}")
+            if destination != "leavepark":
+                await release_unparked_assignment(car_plate, destination)
         finally:
             queue.task_done()
 
@@ -396,6 +419,13 @@ async def dedicated_exit_gate_worker(gate_name: str, queue: asyncio.Queue):
     while True:
         event     = await queue.get()
         car_plate = event.get("car_plate", "")
+        while exit_inflight.get(gate_name):
+            if exit_inflight[gate_name] == car_plate:
+                break
+            await asyncio.sleep(0.05)
+        if exit_inflight.get(gate_name) == car_plate:
+            queue.task_done()
+            continue
         for i in range(12):
             if await is_component_operable(gate_name):
                 break
@@ -429,12 +459,13 @@ async def dedicated_exit_gate_worker(gate_name: str, queue: asyncio.Queue):
 
         print(f"[{gate_name.upper()} WORKER] Opening exit for {car_plate}")
         try:
+            exit_inflight[gate_name] = car_plate
             await api_open_barrier_gate(gate_name)
             await api_send_car_to_destination(car_plate, "leavepark")
-            # await asyncio.sleep(1.2)
-            if queue.empty():
-                await api_close_barrier_gate(gate_name)
+            # ExitSpot CarOut closes the gate after the car has passed.
         except Exception as e:
+            if exit_inflight.get(gate_name) == car_plate:
+                exit_inflight.pop(gate_name, None)
             print(f"[{gate_name.upper()} WORKER ERROR] {car_plate}: {e}")
         finally:
             queue.task_done()
@@ -692,14 +723,17 @@ async def _maintain_spot(name: str, reason: str = "maintenance alarm") -> bool:
 
 async def _maintain_gate(name: str, reason: str = "maintenance alarm") -> bool:
     q = gate_queues.get(name)
-    if (q is None or not q.empty() or has_manual_override(name)
-            or (name in ENTRANCE_GATES and entry_occupied[entry_spot_for_gate(name)])):
+    broken = component_health.get(name, {}).get("broken", False)
+    if (q is None or has_manual_override(name)
+            or (not broken and (not q.empty()
+                or (name in ENTRANCE_GATES and entry_occupied[entry_spot_for_gate(name)])))):
         return False
     print(f"[PREEMPTIVE MAINTENANCE] Gate {name} IDLE - repairing...")
     previous_health = component_health.get(name, {}).copy()
     component_health[name] = {"broken": False, "under_maintenance": True}
     try:
         await call_simulator_api(f"barrier-gates/{name}/repair", method="POST")
+        component_health[name] = {"broken": False, "under_maintenance": False}
         await audit_system("AUTO_REPAIR", "gate", name, reason=reason)
     except Exception as err:
         print(f"[PREEMPTIVE MAINTENANCE ERROR] Gate {name}: {err}")
@@ -715,17 +749,22 @@ async def _maintain_fan(name: str, reason: str = "maintenance alarm") -> bool:
     zone = str(detail.get("zoneParent") or "").upper()
     co = zone_co.get(zone, {})
     was_broken = component_health.get(name, {}).get("broken", False)
-    if not was_broken and (co_needs_ventilation(co.get("risk"), co.get("ppm"))
+    unavailable = was_broken or component_health.get(name, {}).get("under_maintenance", False)
+    if not unavailable and (co_needs_ventilation(co.get("risk"), co.get("ppm"))
                            or (detail.get("isOn") and not co)):
         return False
     print(f"[PREEMPTIVE MAINTENANCE] Fan {name} - turning off and repairing...")
     previous_health = component_health.get(name, {}).copy()
     component_health[name] = {"broken": False, "under_maintenance": True}
     try:
-        if not was_broken and detail.get("isOn"):
+        if not unavailable and detail.get("isOn"):
             await call_simulator_api(f"exhaust-fans/{name}/off", method="POST")
         await call_simulator_api(f"exhaust-fans/{name}/repair", method="POST")
+        component_health[name] = {"broken": False, "under_maintenance": False}
+        detail.update(broken=False, isUnderMaintenance=False)
         await audit_system("AUTO_REPAIR", "fan", name, reason=reason)
+        if co_needs_ventilation(co.get("risk"), co.get("ppm")):
+            await ventilate_zone(zone, True, co.get("risk"), co.get("ppm"))
     except Exception as err:
         print(f"[PREEMPTIVE MAINTENANCE ERROR] Fan {name}: {err}")
         await audit_system("AUTO_REPAIR", "fan", name, success=False, error=str(err)[:200])
@@ -740,7 +779,11 @@ async def auto_preemptive_maintenance_worker():
             await maintenance_scan_once()
         except Exception as exc:
             print(f"[MAINTENANCE SCHEDULER ERROR] {exc}")
-        await asyncio.sleep(MAINTENANCE_SCAN_SECONDS)
+        try:
+            await asyncio.wait_for(maintenance_wakeup.wait(), timeout=MAINTENANCE_SCAN_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+        maintenance_wakeup.clear()
 
 
 async def maintenance_scan_once():
@@ -786,6 +829,8 @@ async def maintenance_scan_once():
                     parking_spots[name] = not (occupied or assigned or item.get("broken") or item.get("isUnderMaintenance"))
 
     candidates = {name: "component failure" for name, health in component_health.items() if health.get("broken")}
+    candidates.update({name: "fan unavailable" for name, health in component_health.items()
+                       if name in fan_details and health.get("under_maintenance") and not health.get("broken")})
     try:
         alarms = await call_simulator_api("list-alarms")
     except Exception as exc:
@@ -801,7 +846,8 @@ async def maintenance_scan_once():
                 candidates[name] = problem
 
     for name, reason in sorted(candidates.items()):
-        if component_health.get(name, {}).get("under_maintenance") or has_manual_override(name):
+        health = component_health.get(name, {})
+        if (health.get("under_maintenance") and not health.get("broken") and name not in fan_details) or has_manual_override(name):
             continue
         if time.monotonic() - repair_attempts.get(name, float("-inf")) < REPAIR_RETRY_SECONDS:
             continue
@@ -821,7 +867,7 @@ async def maintenance_scan_once():
 # ENTRY QUEUE DRAIN
 # -------------------------------------------------
 
-async def process_waiting_entry(entry_name: str):
+async def process_waiting_entry(entry_name: str, departed_plate: str | None = None):
     """
     Release one queued car after an EntrySpot becomes free.
     """
@@ -829,11 +875,15 @@ async def process_waiting_entry(entry_name: str):
     if q is None:
         return
     async with entry_lock:
+        if departed_plate and entry_car.get(entry_name) not in (None, departed_plate):
+            return  # another car has already claimed the physical EntrySpot
         entry_occupied[entry_name] = False
+        entry_car[entry_name] = None
         if q.empty():
             return
         item = q.get_nowait()
         entry_occupied[entry_name] = True
+        entry_car[entry_name] = item["car_plate"]
     car_plate     = item["car_plate"]
     assigned_spot = item.get("assigned_spot")
     print(f"[ENTRY QUEUE] Releasing queued {car_plate} -> {entry_name}" +
@@ -884,9 +934,17 @@ async def process_car_entry(data: dict):
     if existing and existing.get("assigned_spot"):
         assigned_spot = existing["assigned_spot"]
         current_gate  = gate_for_entry_spot(spot_name)
-        print(f"[ENTRY REROUTE] {car_plate} -> {current_gate} for pre-assigned {assigned_spot}.")
-        await gate_queues[current_gate].put({
-            "car_plate": car_plate, "gate_name": current_gate, "destination": assigned_spot,
+        target_gate = spot_gate(assigned_spot)
+        if existing.get("parked") or existing.get("route_stage") in ("at_gate", "dispatched"):
+            return
+        if current_gate != target_gate:
+            if existing.get("route_stage") != "rerouting":
+                existing["route_stage"] = "rerouting"
+                await send_car_to_entry_or_queue(car_plate, entry_spot_for_gate(target_gate), assigned_spot)
+            return
+        existing["route_stage"] = "at_gate"
+        await gate_queues[target_gate].put({
+            "car_plate": car_plate, "gate_name": target_gate, "destination": assigned_spot,
         })
         return
 
@@ -905,7 +963,8 @@ async def process_car_entry(data: dict):
 
         norm_type = normalize_vehicle_type(car_type)
         assigned_spot = target_gate = target_entry = None
-        zone1_spots = zone2_spots = zone3_spots = []
+        current_gate = gate_for_entry_spot(spot_name)
+        preferred_gate = ENTRANCE_GATES[zlib.crc32(car_plate.strip().upper().encode()) % len(ENTRANCE_GATES)]
 
         # Reserve a spot atomically: concurrent entrance webhooks must not choose the same one.
         async with spot_lock:
@@ -915,22 +974,25 @@ async def process_car_entry(data: dict):
                 eligible += [s for s in all_free if get_spot_type(s) == "Electric"]
             elif norm_type == "Accessible":
                 eligible += [s for s in all_free if get_spot_type(s) == "Accessible"]
-            eligible += [s for s in all_free if get_spot_type(s) == "Any"]
-
             operable = [s for s in eligible if gate_operable.get(spot_gate(s))]
-            zone1_spots = [s for s in operable if s.startswith("S")]
-            zone2_spots = [s for s in operable if s.startswith("bay")]
-            zone3_spots = [s for s in operable if s.startswith("P")]
-
-            if zone1_spots:
-                assigned_spot = sorted(zone1_spots, key=extract_spot_number)[0]
-                target_gate, target_entry = "gate1", "ENTRY1"
-            elif zone2_spots:
-                assigned_spot = sorted(zone2_spots, key=extract_spot_number)[0]
-                target_gate, target_entry = "gate3", "ENTRY2"
-            elif zone3_spots:
-                assigned_spot = sorted(zone3_spots, key=extract_spot_number)[0]
-                target_gate, target_entry = "gate5", "ENTRY3"
+            if not operable:
+                operable = [s for s in all_free
+                            if get_spot_type(s) == "Any" and gate_operable.get(spot_gate(s))]
+            choices = {gate: sorted((s for s in operable if spot_gate(s) == gate),
+                                    key=extract_spot_number) for gate in ENTRANCE_GATES}
+            usable_gates = [gate for gate, spots in choices.items() if spots]
+            if usable_gates:
+                # A plate picks a stable preferred zone. Queue and EntrySpot load
+                # override that preference when rerouting would cause a pile-up.
+                target_gate = min(usable_gates, key=lambda gate: (
+                    gate_queues[gate].qsize()
+                    + (2 if gate != current_gate and entry_occupied[entry_spot_for_gate(gate)] else 0)
+                    + (0 if gate == current_gate else 1)
+                    - (2 if gate == preferred_gate else 0),
+                    ENTRANCE_GATES.index(gate),
+                ))
+                assigned_spot = choices[target_gate][0]
+                target_entry = entry_spot_for_gate(target_gate)
 
             if assigned_spot:
                 parking_spots[assigned_spot] = False
@@ -938,16 +1000,17 @@ async def process_car_entry(data: dict):
                     "entry_time": server_time, "car_type": car_type,
                     "assigned_spot": assigned_spot, "assigned_ts": time.time(),
                     "planned_duration": planned_dur, "charged": False, "parked": False,
+                    "route_stage": "allocated",
                 }
 
         if assigned_spot:
-            current_gate = gate_for_entry_spot(spot_name)
             print(
                 f"[ROUTING] {car_plate}: current={spot_name}/{current_gate}, "
                 f"assigned={assigned_spot}, target={target_entry}/{target_gate}"
             )
 
             if current_gate == target_gate:
+                active_cars[car_plate]["route_stage"] = "at_gate"
                 print(f"[ENTRY] {car_plate} at correct {current_gate} -> {assigned_spot}.")
                 await gate_queues[current_gate].put({
                     "car_plate": car_plate,
@@ -955,15 +1018,12 @@ async def process_car_entry(data: dict):
                     "destination": assigned_spot,
                 })
             else:
+                active_cars[car_plate]["route_stage"] = "rerouting"
                 print(
                     f"[ENTRY REROUTE] {car_plate} at {current_gate}, "
                     f"needs {target_gate} -> {target_entry}."
                 )
 
-                if current_gate == "gate3" and zone1_spots:
-                    await api_close_barrier_gate("gate3")
-                elif current_gate == "gate5" and (zone1_spots or zone2_spots):
-                    await api_close_barrier_gate("gate5")
                 await send_car_to_entry_or_queue(car_plate, target_entry, assigned_spot)
         else:
             print(f"[ENTRY] No spot for {car_plate} ({norm_type}) -> leavepark.")
@@ -1137,6 +1197,7 @@ async def webhook(request: Request):
         comp = data.get("Name") or data.get("ComponentName")
         if comp:
             component_health[comp] = {"broken": True, "under_maintenance": False}
+            maintenance_wakeup.set()
             print(f"[COMPONENT] {comp} BROKEN.")
 
     elif event_class in ("component_fixed","component_repaired"):
@@ -1152,6 +1213,7 @@ async def webhook(request: Request):
         comp = data.get("Name") or data.get("ComponentName")
         if comp:
             component_health[comp] = {"broken": False, "under_maintenance": True}
+            maintenance_wakeup.set()
 
     elif event_class in ("payment_made","payment_received"):
         # The simulator can emit fake payment events. Only a successful /charge
@@ -1187,6 +1249,10 @@ async def webhook(request: Request):
                         active_cars[car_plate]["assigned_spot"] = spot_name
                         active_cars[car_plate]["parked_spot"]   = spot_name
                         active_cars[car_plate]["parked"]        = True
+                    for gate, moving_plate in list(gate_inflight.items()):
+                        if moving_plate == car_plate:
+                            gate_inflight.pop(gate, None)  # missed EntrySpot CarOut
+                            asyncio.create_task(auto_close_gate_after_delay(gate, 0.3))
                 print(f"[SENSOR] {spot_name} OCCUPIED by {car_plate}.")
             elif direction == "CarOut":
                 parking_spots[spot_name] = True
@@ -1201,11 +1267,18 @@ async def webhook(request: Request):
             if direction == "CarIn":
                 async with entry_lock:
                     entry_occupied[entry_name] = True
+                    entry_car[entry_name] = car_plate or entry_car.get(entry_name)
             elif direction == "CarOut":
+                gate = gate_for_entry_spot(entry_name)
+                if not car_plate or gate_inflight.get(gate) == car_plate:
+                    gate_inflight.pop(gate, None)
                 asyncio.create_task(auto_close_gate_after_delay(gate_for_entry_spot(entry_name), 0.3))
-                asyncio.create_task(process_waiting_entry(entry_name))
+                asyncio.create_task(process_waiting_entry(entry_name, car_plate or None))
 
     if (spot_type == "ExitSpot" or (spot_name and spot_name.upper().startswith("EXIT"))) and direction == "CarOut":
+        gate = exit_gate_for_spot(spot_name)
+        if not car_plate or exit_inflight.get(gate) == car_plate:
+            exit_inflight.pop(gate, None)
         if car_plate:
             active_cars.pop(car_plate, None)
             charged_cars.discard(car_plate)

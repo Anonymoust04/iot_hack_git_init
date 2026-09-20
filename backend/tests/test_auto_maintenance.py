@@ -54,18 +54,13 @@ def test_broken_closed_gate_repairs_once_per_cooldown(monkeypatch):
     assert main.usage_cycles["gate1"]["type"] == "gate"
 
 
-def test_busy_or_open_gate_waits_until_safe(monkeypatch):
+def test_broken_gate_repairs_even_with_waiting_cars(monkeypatch):
     state, commands = setup_maintenance(
         monkeypatch,
         barriers=[{"name": "gate1", "state": "Open", "broken": True}],
     )
     main.gate_queues["gate1"].put_nowait({"car_plate": "WAITING"})
 
-    asyncio.run(main.maintenance_scan_once())
-    assert commands == []
-
-    main.gate_queues["gate1"].get_nowait()
-    state["list-barriers"][0]["state"] = "Closed"
     asyncio.run(main.maintenance_scan_once())
     assert commands == [("barrier-gates/gate1/repair", "POST")]
 
