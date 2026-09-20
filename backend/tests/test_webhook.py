@@ -85,16 +85,36 @@ def event_types(db, plate=None, event_type=None):
 def test_bad_signature_is_stored_but_not_processed(db, client):
     client.post("/webhook", json={"EventClass": "gate_action", "CarPlateNumber": "FAKE 1", "Name": "gateZ",
                                   "Action": "Open", "EventId": "x", "SequenceId": 1, "Signature": "0" * 32})
-    wait_until(lambda: event_types(db, "FAKE 1") == ["WEBHOOK_BAD_SIGNATURE"])
+    # db_hook logs the rejected payload; main.py's integrity guard logs the incident.
+    wait_until(lambda: "WEBHOOK_BAD_SIGNATURE" in event_types(db, "FAKE 1"))
+    wait_until(lambda: "INTEGRITY_REJECTED" in event_types(db, "FAKE 1"))
     assert db.scalar(select(Gate).where(Gate.name == "gateZ")) is None
 
 
-def test_unsigned_webhook_from_the_simulator_is_rejected_and_logged(db, client):
-    # Strict Level 2 policy: the real simulator must provide a signature.
+def test_unsigned_webhook_is_rejected_when_signatures_are_required(db, client, monkeypatch):
+    """Strict policy (WEBHOOK_REQUIRE_SIGNATURE=true): an unsigned webhook is dropped.
+
+    It is OFF by default because the shipped simulator sends "Signature": null on
+    every webhook (docs/LEVEL1.md); see the next test for the default behaviour.
+    """
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "webhook_require_signature", True)
     client.post("/webhook", json={"EventClass": "gate_action", "Name": "gateU", "Action": "Open",
                                   "EventId": str(uuid.uuid4()), "SequenceId": next(_seq), "Signature": None})
     wait_until(lambda: event_types(db, event_type="WEBHOOK_UNSIGNED") == ["WEBHOOK_UNSIGNED"])
     assert db.scalar(select(Gate).where(Gate.name == "gateU")) is None
+
+
+def test_unsigned_webhook_is_processed_but_flagged_by_default(db, client, admin_headers):
+    """Default policy: the park keeps moving, and the request is visible to an admin."""
+    before = client.get("/api/integrity/summary", headers=admin_headers).json()
+    client.post("/webhook", json={"EventClass": "gate_action", "Name": "gate1", "Action": "Opening",
+                                  "EventId": str(uuid.uuid4()), "SequenceId": next(_seq),
+                                  "Signature": None})
+    wait_until(lambda: db.scalar(select(Gate).where(Gate.name == "gate1")) is not None)
+    after = client.get("/api/integrity/summary", headers=admin_headers).json()
+    assert after["by_verdict"].get("unsigned_accepted", 0) > before["by_verdict"].get("unsigned_accepted", 0)
 
 
 def test_duplicate_event_id_is_stored_once(db, client):
@@ -169,8 +189,14 @@ def test_car_visit_updates_spots_and_history(db, client, admin_headers):
     assert (session.status, session.payment_status) == (SessionStatus.COMPLETED, PaymentStatus.PENDING)
     # entry = arrival at the entrance, exit = left the park, both on the simulator clock
     assert (str(session.entry_time), str(session.exit_time)) == ("2026-09-12 15:40:17", "2026-09-12 15:42:41")
-    assert [t for t in event_types(db, plate) if t != "WEBHOOK"] == [
+    lifecycle = {"CAR_ARRIVED", "CAR_ENTERED", "CAR_PARKED", "CAR_EXITING", "CAR_DEPARTED"}
+    types = event_types(db, plate)
+    assert [t for t in types if t in lifecycle] == [
         "CAR_ARRIVED", "CAR_ENTERED", "CAR_PARKED", "CAR_EXITING", "CAR_DEPARTED"]
+    # The car was routed to a spot of main.py's choosing but parked in S5, and the
+    # payment event is for a charge main.py never made: both are now recorded.
+    assert "VEHICLE_MISPARKED" in types
+    assert "PAYMENT_SUSPICIOUS" in types
     assert client.get("/api/dashboard", headers=admin_headers).json()["cars_inside"] == 0
 
     # the dashboard's activity feed asks for several event types in one call

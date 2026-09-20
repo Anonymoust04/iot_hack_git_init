@@ -19,16 +19,32 @@ Key behaviours
 """
 
 import asyncio
+import hashlib
+import json
 import math
+import re
 import time
+import uuid
 import zlib
-from datetime import datetime
+from collections import Counter, defaultdict, deque
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from pydantic import BaseModel
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
 import httpx
 
 app = FastAPI(title="Parking Simulator Backend - Level 2")
+
+
+def sim_now() -> datetime:
+    """Naive UTC, matching how the database stores every timestamp."""
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _utc_from_timestamp(value: float) -> datetime:
+    return datetime.fromtimestamp(value, UTC).replace(tzinfo=None)
+
 
 import db_hook
 import sys
@@ -37,8 +53,8 @@ from pathlib import Path
 _backend_dir = str(Path(__file__).resolve().parents[1])
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
-from app.api.deps import CurrentUser, require_permission
-from app.config import get_settings
+from app.api.deps import AdminUser, CurrentUser, require_permission
+from app.config import Settings, get_settings
 from app.core.permissions import Permission
 from app.models import User
 from app.services.device_overrides import has_manual_override, set_manual_override
@@ -47,6 +63,7 @@ GateControlDependency = Annotated[User, Depends(require_permission(Permission.GA
 LightControlDependency = Annotated[User, Depends(require_permission(Permission.LIGHT_CONTROL))]
 FanControlDependency = Annotated[User, Depends(require_permission(Permission.FAN_CONTROL))]
 RepairDependency = Annotated[User, Depends(require_permission(Permission.REPAIR))]
+AdminDependency = AdminUser
 
 db_hook.setup(app)
 
@@ -60,30 +77,100 @@ SIMULATOR_URL      = str(getattr(get_settings(), "sim_base_url", "http://127.0.0
 SIMULATOR_EMAIL    = "admin"
 SIMULATOR_PASSWORD = "admin"
 
-VALID_PARKING_SPOTS = (
-    [f"S{i}"   for i in range(1, 31)]  +
-    [f"bay{i}" for i in range(36, 66)] +
-    [f"P{i}"   for i in range(69, 99)]
-)
+# -------------------------------------------------
+# PARKING ZONE REGISTRY
+# -------------------------------------------------
+#
+# Every zone declares its own layout, capacity, entrances and exits. Adding a
+# fourth zone (or giving Zone 2 a second entrance) is a change to ZONE_DEFS
+# only: spot ownership, gate routing, EntrySpot/ExitSpot names, per-zone
+# capacity and the failover order are all derived from this table below.
+#
+#   spots        the parking spot names that belong to the zone, in layout order
+#   entrances    entrance gates serving the zone, most preferred first
+#   exits        exit gates serving the zone, most preferred first
+#   entry_spots  gate -> the physical EntrySpot a car is sent to for that gate
+#   exit_spots   gate -> the physical ExitSpot the simulator reports for that gate
+#   car_types    spot name -> reserved vehicle type (spots not listed are "Any")
 
-ENTRANCE_GATES = ["gate1", "gate3", "gate5"]
-EXIT_GATES     = ["gate2", "gate4", "gate6"]
-ALL_GATES      = ENTRANCE_GATES + EXIT_GATES
+ZONE_DEFS: list[dict] = [
+    {
+        "id": "ZONE1",
+        "label": "Zone 1",
+        "spots": [f"S{i}" for i in range(1, 31)],
+        "entrances": ["gate1"],
+        "exits": ["gate2"],
+        "entry_spots": {"gate1": "ENTRY1"},
+        "exit_spots": {"gate2": "EXIT1"},
+        "car_types": {
+            "S5": "Electric", "S6": "Electric", "S10": "Electric", "S11": "Electric",
+            "S20": "Electric", "S21": "Electric", "S25": "Electric", "S26": "Electric",
+            "S7": "Accessible", "S8": "Accessible", "S9": "Accessible",
+        },
+    },
+    {
+        "id": "ZONE2",
+        "label": "Zone 2",
+        "spots": [f"bay{i}" for i in range(36, 66)],
+        "entrances": ["gate3"],
+        "exits": ["gate4"],
+        "entry_spots": {"gate3": "ENTRY2"},
+        "exit_spots": {"gate4": "EXIT2"},
+        "car_types": {
+            "bay42": "Electric", "bay43": "Electric", "bay47": "Electric", "bay48": "Electric",
+            "bay56": "Electric", "bay57": "Electric", "bay61": "Electric", "bay62": "Electric",
+            "bay58": "Accessible", "bay59": "Accessible", "bay60": "Accessible",
+        },
+    },
+    {
+        "id": "ZONE3",
+        "label": "Zone 3",
+        "spots": [f"P{i}" for i in range(69, 99)],
+        "entrances": ["gate5"],
+        "exits": ["gate6"],
+        "entry_spots": {"gate5": "ENTRY3"},
+        "exit_spots": {"gate6": "EXIT3"},
+        "car_types": {
+            "P74": "Electric", "P75": "Electric", "P76": "Electric", "P77": "Electric",
+            "P78": "Electric",
+            "P79": "Accessible", "P80": "Accessible", "P81": "Accessible",
+        },
+    },
+]
+
+ZONES: dict[str, dict] = {z["id"]: z for z in ZONE_DEFS}
+
+# Derived lookups. Nothing below this line hard-codes a zone, a gate or a spot range.
+VALID_PARKING_SPOTS: list[str] = [s for z in ZONE_DEFS for s in z["spots"]]
+SPOT_ZONE: dict[str, str] = {s: z["id"] for z in ZONE_DEFS for s in z["spots"]}
+ZONE_CAPACITY: dict[str, int] = {z["id"]: len(z["spots"]) for z in ZONE_DEFS}
+
+ENTRANCE_GATES: list[str] = [g for z in ZONE_DEFS for g in z["entrances"]]
+EXIT_GATES: list[str] = [g for z in ZONE_DEFS for g in z["exits"]]
+ALL_GATES: list[str] = ENTRANCE_GATES + EXIT_GATES
+
+GATE_ZONE: dict[str, str] = {g: z["id"] for z in ZONE_DEFS for g in z["entrances"] + z["exits"]}
+GATE_ENTRY_SPOT: dict[str, str] = {g: name for z in ZONE_DEFS for g, name in z["entry_spots"].items()}
+GATE_EXIT_SPOT: dict[str, str] = {g: name for z in ZONE_DEFS for g, name in z["exit_spots"].items()}
+ENTRY_SPOT_GATE: dict[str, str] = {name: g for g, name in GATE_ENTRY_SPOT.items()}
+EXIT_SPOT_GATE: dict[str, str] = {name: g for g, name in GATE_EXIT_SPOT.items()}
+ENTRY_SPOTS: list[str] = list(ENTRY_SPOT_GATE)
 
 SPOT_CAR_TYPES: dict[str, str] = {
-    "S5": "Electric", "S6": "Electric", "S10": "Electric", "S11": "Electric",
-    "S20": "Electric", "S21": "Electric", "S25": "Electric", "S26": "Electric",
-    "S7": "Accessible", "S8": "Accessible", "S9": "Accessible",
-    "bay42": "Electric", "bay43": "Electric", "bay47": "Electric", "bay48": "Electric",
-    "bay56": "Electric", "bay57": "Electric", "bay61": "Electric", "bay62": "Electric",
-    "bay58": "Accessible", "bay59": "Accessible", "bay60": "Accessible",
-    "P74": "Electric", "P75": "Electric", "P76": "Electric", "P77": "Electric", "P78": "Electric",
-    "P79": "Accessible", "P80": "Accessible", "P81": "Accessible",
+    spot: kind for z in ZONE_DEFS for spot, kind in z["car_types"].items()
 }
 
 
 def get_spot_type(spot_name: str) -> str:
     return SPOT_CAR_TYPES.get(spot_name, "Any")
+
+
+def zone_of_spot(spot_name: str) -> str | None:
+    return SPOT_ZONE.get(spot_name)
+
+
+def zone_of_gate(gate_name: str) -> str | None:
+    return GATE_ZONE.get(gate_name)
 
 
 def normalize_vehicle_type(raw_type: str) -> str:
@@ -96,15 +183,26 @@ def normalize_vehicle_type(raw_type: str) -> str:
 
 
 def spot_gate(spot_name: str) -> str:
-    if spot_name.startswith("S"):
-        return "gate1"
-    if spot_name.startswith("bay"):
-        return "gate3"
-    return "gate5"
+    """Preferred entrance gate for a spot's zone (first declared entrance)."""
+    zone = ZONES.get(SPOT_ZONE.get(spot_name, ""), None)
+    if zone and zone["entrances"]:
+        return zone["entrances"][0]
+    return ENTRANCE_GATES[0]
+
+
+def entrance_gates_for_spot(spot_name: str) -> list[str]:
+    """Every entrance gate that can deliver a car to this spot's zone, preferred first."""
+    zone = ZONES.get(SPOT_ZONE.get(spot_name, ""), None)
+    return list(zone["entrances"]) if zone else []
+
+
+def exit_gates_for_zone(zone_id: str | None) -> list[str]:
+    zone = ZONES.get(zone_id or "", None)
+    return list(zone["exits"]) if zone else []
 
 
 def entry_spot_for_gate(gate: str) -> str:
-    return {"gate1": "ENTRY1", "gate3": "ENTRY2", "gate5": "ENTRY3"}.get(gate, "ENTRY1")
+    return GATE_ENTRY_SPOT.get(gate, ENTRY_SPOTS[0] if ENTRY_SPOTS else "ENTRY1")
 
 
 def extract_spot_number(name: str) -> int:
@@ -112,22 +210,32 @@ def extract_spot_number(name: str) -> int:
     return int(digits) if digits else 9999
 
 
+def _normalise_spot_key(spot_name: str) -> str:
+    return (spot_name or "").lower().replace(" ", "").replace("_", "").replace("-", "")
+
+
 def gate_for_entry_spot(spot_name: str) -> str:
-    norm = (spot_name or "").lower().replace(" ", "").replace("_", "")
-    if "entry2" in norm or "gate3" in norm:
-        return "gate3"
-    if "entry3" in norm or "gate5" in norm:
-        return "gate5"
-    return "gate1"
+    """Which entrance gate an EntrySpot (or a gate name) belongs to."""
+    norm = _normalise_spot_key(spot_name)
+    for entry_name, gate in ENTRY_SPOT_GATE.items():
+        if _normalise_spot_key(entry_name) == norm or _normalise_spot_key(gate) == norm:
+            return gate
+    for entry_name, gate in ENTRY_SPOT_GATE.items():
+        if _normalise_spot_key(entry_name) in norm or _normalise_spot_key(gate) in norm:
+            return gate
+    return ENTRANCE_GATES[0]
 
 
 def exit_gate_for_spot(spot_name: str) -> str:
-    norm = (spot_name or "").lower()
-    if "exit2" in norm or "gate4" in norm:
-        return "gate4"
-    if "exit3" in norm or "gate6" in norm:
-        return "gate6"
-    return "gate2"
+    """Which exit gate an ExitSpot (or a gate name) belongs to."""
+    norm = _normalise_spot_key(spot_name)
+    for exit_name, gate in EXIT_SPOT_GATE.items():
+        if _normalise_spot_key(exit_name) == norm or _normalise_spot_key(gate) == norm:
+            return gate
+    for exit_name, gate in EXIT_SPOT_GATE.items():
+        if _normalise_spot_key(exit_name) in norm or _normalise_spot_key(gate) in norm:
+            return gate
+    return EXIT_GATES[0]
 
 
 # -------------------------------------------------
@@ -144,25 +252,27 @@ gate_inflight: dict[str, str] = {}  # a gate admits one plate until its EntrySpo
 exit_inflight: dict[str, str] = {}  # exit gate releases the next car after ExitSpot CarOut
 
 # Physical EntrySpot occupancy. The simulator rejects a second car if it is
-# sent to ENTRY2/ENTRY3 while another car is still sitting there.
-entry_occupied: dict[str, bool] = {
-    "ENTRY1": False,
-    "ENTRY2": False,
-    "ENTRY3": False,
-}
+# sent to an EntrySpot while another car is still sitting there.
+entry_occupied: dict[str, bool] = {name: False for name in ENTRY_SPOTS}
+
+# Which plate currently holds each EntrySpot, and since when (watchdog input).
+entry_car: dict[str, str | None] = {name: None for name in ENTRY_SPOTS}
+entry_occupied_since: dict[str, float] = {name: 0.0 for name in ENTRY_SPOTS}
+
+# A car that never produces its EntrySpot CarOut blocks the whole zone; after this
+# long the watchdog nudges it on and releases the spot for the queue behind it.
+ENTRY_SPOT_TIMEOUT_SECONDS = 45.0
 
 # Per-EntrySpot FIFO queue for cars waiting while the spot is occupied.
-entry_queues: dict[str, asyncio.Queue] = {
-    "ENTRY1": asyncio.Queue(),
-    "ENTRY2": asyncio.Queue(),
-    "ENTRY3": asyncio.Queue(),
-}
+entry_queues: dict[str, asyncio.Queue] = {name: asyncio.Queue() for name in ENTRY_SPOTS}
 entry_lock = asyncio.Lock()
 active_cars:  dict[str, dict] = {}
 charged_cars: set[str] = set()
 
-webhook_events:      list[dict] = []
-recent_car_arrivals: list[dict] = []
+# Bounded history. deque drops the oldest in O(1); the old list+pop(0) copied the
+# whole list on every webhook, which is the hot path under event bursts.
+webhook_events:      deque[dict] = deque(maxlen=400)
+recent_car_arrivals: deque[dict] = deque(maxlen=50)
 
 component_health: dict[str, dict] = {}
 usage_cycles:     dict[str, dict] = {}
@@ -175,6 +285,1214 @@ MAINTENANCE_SCAN_SECONDS = 15.0
 maintenance_wakeup = asyncio.Event()
 
 _last_sim_hour: int = 12
+
+
+# =================================================================
+# INCIDENT LEDGER  (audit trail for everything below)
+# =================================================================
+#
+# One place records every abnormal thing the backend notices or does:
+# rejected webhooks, sensor faults, maintenance switches, double parking,
+# suspicious payments, gate failovers. Each incident goes to three places:
+#   1. an in-memory ring, so the admin pages stay fast and work without MySQL;
+#   2. the `events` table, so it appears in reports and the daily summary;
+#   3. `audit_logs`, so the audit page shows who or what caused it.
+
+INCIDENT_RING_SIZE = 1000
+
+SEVERITY_ORDER = {"info": 0, "warning": 1, "critical": 2}
+
+# Incident type -> (events.event_type, audit action). Keeping the mapping in one
+# table means a new incident type is a one-line change, and docs/EVENT_TYPES.md
+# has a single list to mirror.
+INCIDENT_TYPES: dict[str, tuple[str, str]] = {
+    "integrity_rejected":  ("INTEGRITY_REJECTED",   "WEBHOOK_REJECTED"),
+    "integrity_warning":   ("INTEGRITY_WARNING",    "WEBHOOK_SUSPECT"),
+    "sensor_abnormal":     ("SENSOR_ABNORMAL",      "SENSOR_FAULT"),
+    "spot_maintenance":    ("SPOT_MAINTENANCE",     "MAINTENANCE_MODE"),
+    "double_parking":      ("DOUBLE_PARKING",       "DOUBLE_PARKING_WARNING"),
+    "vehicle_misparked":   ("VEHICLE_MISPARKED",    "VEHICLE_MISPARKED"),
+    "payment_suspicious":  ("PAYMENT_SUSPICIOUS",   "PAYMENT_SUSPECT"),
+    "payment_retry":       ("PAYMENT_RETRY",        "PAYMENT_REQUESTED_AGAIN"),
+    "payment_settled":     ("PAYMENT_SETTLED",      "PAYMENT_CONFIRMED"),
+    "gate_failover":       ("GATE_FAILOVER",        "GATE_FAILOVER"),
+    "capacity":            ("ZONE_CAPACITY",        "ZONE_CAPACITY"),
+}
+
+incidents: deque[dict] = deque(maxlen=INCIDENT_RING_SIZE)
+incident_counts: Counter = Counter()
+_incident_seq = 0
+
+
+def _persist_incident(entry: dict) -> None:
+    """events + audit_logs row for one incident. Runs in a worker thread."""
+    event_type, action = INCIDENT_TYPES.get(entry["type"], ("INCIDENT", "INCIDENT"))
+    try:
+        from app.db.session import SessionLocal
+        from app.services.audit import record_audit
+        from app.services.parking import log_event
+        with SessionLocal() as db:
+            log_event(db, event_type, car_plate=entry.get("plate"),
+                      parking_spot=entry.get("spot"), gate_name=entry.get("gate"),
+                      raw_data={"severity": entry["severity"], "reason": entry["reason"],
+                                "zone": entry.get("zone"), **(entry.get("details") or {})})
+            db.commit()
+            record_audit(db, action, actor=entry.get("actor"),
+                         target_type=entry.get("target_type") or "system",
+                         target_name=entry.get("spot") or entry.get("gate") or entry.get("plate"),
+                         success=entry["severity"] == "info",
+                         details={"reason": entry["reason"], "zone": entry.get("zone"),
+                                  **(entry.get("details") or {})})
+    except Exception as exc:  # never let bookkeeping break the car flow
+        print(f"[INCIDENT] not persisted ({entry['type']}): {exc}")
+
+
+def record_incident(kind: str, reason: str, *, severity: str = "warning", plate: str | None = None,
+                    spot: str | None = None, gate: str | None = None, zone: str | None = None,
+                    actor: str | None = None, target_type: str | None = None,
+                    persist: bool = True, **details) -> dict:
+    """Log one abnormal event. Safe to call from any async context; never raises."""
+    global _incident_seq
+    _incident_seq += 1
+    if zone is None:
+        zone = zone_of_spot(spot or "") or zone_of_gate(gate or "")
+    entry = {
+        "id": _incident_seq,
+        "type": kind,
+        "severity": severity if severity in SEVERITY_ORDER else "warning",
+        "reason": reason,
+        "plate": plate,
+        "spot": spot,
+        "gate": gate,
+        "zone": zone,
+        "actor": actor,
+        "target_type": target_type,
+        "details": details or None,
+        "at": time.time(),
+        "at_text": sim_now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    incidents.append(entry)
+    incident_counts[kind] += 1
+    print(f"[INCIDENT] {severity.upper()} {kind}: {reason}"
+          + (f" (plate={plate})" if plate else "") + (f" (spot={spot})" if spot else ""))
+    if persist:
+        try:
+            asyncio.get_running_loop()
+            asyncio.create_task(asyncio.to_thread(_persist_incident, entry))
+        except RuntimeError:
+            pass  # no event loop (unit test / import time): the in-memory ring is enough
+    return entry
+
+
+# =================================================================
+# REQUEST INTEGRITY GUARD
+# =================================================================
+#
+# The parking network is not trusted. Every webhook is checked for:
+#   malformed      not JSON, or not an object, or no EventClass
+#   unsigned       no Signature while signatures are required
+#   tampered       Signature does not match the payload's own fields
+#   duplicate      an EventId we have already accepted (retry or replay attack)
+#   replay         a SequenceId at or below one we already accepted
+#   unknown_target names a spot, gate or zone that does not exist in this park
+#   stale          ServerDateTime far behind the simulator clock we last saw
+#   flood          one source sending far more than the simulator ever would
+#
+# "duplicate" and the other rejects are dropped but always counted and shown on
+# the admin page. A sequence "gap" is only a warning: a missed event cannot be
+# fetched again, so the payload is still processed.
+
+INTEGRITY_SEEN_EVENTS = 8000          # EventIds remembered for duplicate detection
+INTEGRITY_CLOCK_SKEW_SECONDS = 900.0  # 15 simulated minutes behind
+INTEGRITY_RATE_WINDOW = 10.0          # seconds
+INTEGRITY_RATE_LIMIT = 600            # webhooks per source per window (the sim sends far fewer)
+
+_seen_event_ids: dict[str, float] = {}
+_seen_event_order: deque[str] = deque()
+_last_sequence_id: int | None = None
+_source_hits: dict[str, deque] = defaultdict(deque)
+
+integrity_stats: Counter = Counter()
+# Every rejected or suspect request, newest last. Shown on the admin page.
+integrity_log: deque[dict] = deque(maxlen=500)
+# Duplicated calls specifically, grouped by EventId, with how many copies arrived.
+duplicate_calls: dict[str, dict] = {}
+
+# Deliberately permissive: plate formats differ between levels, so this only
+# rejects values that cannot be a plate at all (control characters, markup,
+# quotes, or an absurd length) rather than enforcing one country's format.
+PLATE_RE = re.compile(r"^[^\x00-\x1f<>\"\'\\/;]{1,32}$")
+
+
+def _normalise(value) -> str:
+    return str(value or "").strip()
+
+
+def _unknown_target_field(payload: dict) -> str | None:
+    """Returns the offending field name if the payload names something we do not have."""
+    spot = _normalise(payload.get("SpotName"))
+    if spot:
+        upper = spot.upper()
+        known = (spot in parking_spots
+                 or upper in {s.upper() for s in ENTRY_SPOTS}
+                 or upper.startswith("ENTRY") or upper.startswith("EXIT")
+                 or upper in ("LEAVEPARK", "EXIT"))
+        if not known:
+            return "SpotName"
+    name = _normalise(payload.get("Name") or payload.get("ComponentName"))
+    if name and payload.get("EventClass") == "gate_action" and name not in ALL_GATES:
+        return "Name"
+    zone = _normalise(payload.get("ZoneName"))
+    if zone and str(payload.get("EventClass") or "").startswith("carbon") and zone.upper() not in ZONES:
+        return "ZoneName"
+    return None
+
+
+def _remember_event_id(event_id: str) -> None:
+    _seen_event_ids[event_id] = time.time()
+    _seen_event_order.append(event_id)
+    while len(_seen_event_order) > INTEGRITY_SEEN_EVENTS:
+        _seen_event_ids.pop(_seen_event_order.popleft(), None)
+
+
+def _rate_limited(source: str) -> bool:
+    now = time.monotonic()
+    hits = _source_hits[source]
+    hits.append(now)
+    cutoff = now - INTEGRITY_RATE_WINDOW
+    while hits and hits[0] < cutoff:
+        hits.popleft()
+    return len(hits) > INTEGRITY_RATE_LIMIT
+
+
+def _log_integrity(verdict: str, reason: str, payload: dict, source: str,
+                   event_id: str | None, severity: str) -> dict:
+    entry = {
+        "id": integrity_stats["total"],
+        "verdict": verdict,
+        "reason": reason,
+        "source": source,
+        "event_id": event_id,
+        "sequence_id": payload.get("SequenceId"),
+        "event_class": payload.get("EventClass"),
+        "plate": payload.get("CarPlateNumber") or payload.get("CarPlate"),
+        "spot": payload.get("SpotName"),
+        "server_time": payload.get("ServerDateTime"),
+        "severity": severity,
+        "at": time.time(),
+        "at_text": sim_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "payload_digest": hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16],
+    }
+    integrity_log.append(entry)
+    integrity_stats[verdict] += 1
+    return entry
+
+
+def check_request_integrity(body: bytes, source: str) -> tuple[dict, str | None, str | None]:
+    """Returns (payload, verdict, reason).
+
+    verdict is None when the payload may be processed; any other verdict means
+    the request is rejected and must not touch the car state machine.
+    """
+    global _last_sequence_id
+    integrity_stats["total"] += 1
+
+    try:
+        payload = json.loads(body)
+        # Numbers keep their original JSON text: the simulator signs that text, so
+        # 63.564693 must not change through a float round-trip.
+        sig_fields = json.loads(body, parse_float=str, parse_int=str)
+    except ValueError:
+        payload = {"raw": body[:500].decode(errors="replace")}
+        entry = _log_integrity("malformed", "body is not valid JSON", payload, source, None, "critical")
+        record_incident("integrity_rejected", "Malformed webhook body (not JSON)",
+                        severity="critical", source=source, digest=entry["payload_digest"])
+        return payload, "malformed", "not valid JSON"
+
+    if not isinstance(payload, dict):
+        payload = {"raw": payload}
+        _log_integrity("malformed", "payload is not a JSON object", payload, source, None, "critical")
+        record_incident("integrity_rejected", "Webhook payload is not a JSON object",
+                        severity="critical", source=source)
+        return payload, "malformed", "not a JSON object"
+
+    raw_event_id = payload.get("EventId")
+    event_id = str(raw_event_id) if raw_event_id not in (None, "") else None
+
+    if _rate_limited(source):
+        _log_integrity("flood", f"more than {INTEGRITY_RATE_LIMIT} calls in "
+                                f"{INTEGRITY_RATE_WINDOW:.0f}s", payload, source, event_id, "critical")
+        record_incident("integrity_rejected", f"Source {source} is flooding the webhook endpoint",
+                        severity="critical", source=source, limit=INTEGRITY_RATE_LIMIT)
+        return payload, "flood", "rate limit exceeded"
+
+    if not payload.get("EventClass"):
+        _log_integrity("malformed", "no EventClass", payload, source, event_id, "warning")
+        record_incident("integrity_rejected", "Webhook without EventClass", severity="warning",
+                        source=source)
+        return payload, "malformed", "no EventClass"
+
+    # --- tamper check ---------------------------------------------------
+    settings = get_settings()
+    unsigned = sig_fields.get("Signature") in (None, "")
+    if unsigned and not settings.webhook_require_signature:
+        # Processed, but counted and visible on the admin integrity page: an
+        # unsigned request cannot be proven genuine.
+        _log_integrity("unsigned_accepted", "no Signature (accepted: signatures not required)",
+                       payload, source, event_id, "warning")
+    must_check = settings.webhook_verify_signature and (settings.webhook_require_signature or not unsigned)
+    if must_check:
+        from app.services.webhook_handlers import signature_is_valid
+        if unsigned:
+            # Only reached when WEBHOOK_REQUIRE_SIGNATURE is on. The shipped simulator
+            # sends Signature: null on every webhook (see docs/LEVEL1.md), so the
+            # default is off and unsigned traffic is flagged below instead of dropped.
+            _log_integrity("unsigned", "no Signature field", payload, source, event_id, "critical")
+            record_incident("integrity_rejected", "Unsigned webhook rejected", severity="critical",
+                            plate=payload.get("CarPlateNumber"), source=source,
+                            event_class=payload.get("EventClass"))
+            return payload, "unsigned", "missing signature"
+        if not signature_is_valid(sig_fields):
+            _log_integrity("tampered", "Signature does not match the payload", payload, source,
+                           event_id, "critical")
+            record_incident("integrity_rejected", "Tampered webhook: signature mismatch",
+                            severity="critical", plate=payload.get("CarPlateNumber"), source=source,
+                            event_class=payload.get("EventClass"))
+            return payload, "tampered", "bad signature"
+
+    # --- duplicate / replay ---------------------------------------------
+    if event_id is not None and event_id in _seen_event_ids:
+        record = duplicate_calls.setdefault(event_id, {
+            "event_id": event_id,
+            "event_class": payload.get("EventClass"),
+            "plate": payload.get("CarPlateNumber") or payload.get("CarPlate"),
+            "spot": payload.get("SpotName"),
+            "copies": 1,
+            "first_seen_text": _utc_from_timestamp(
+                _seen_event_ids[event_id]).strftime("%Y-%m-%d %H:%M:%S"),
+            "sources": [],
+        })
+        record["copies"] += 1
+        record["last_seen_text"] = sim_now().strftime("%Y-%m-%d %H:%M:%S")
+        if source not in record["sources"]:
+            record["sources"].append(source)
+        _log_integrity("duplicate", f"EventId {event_id} already processed "
+                                    f"({record['copies']} copies)", payload, source, event_id, "warning")
+        record_incident("integrity_rejected",
+                        f"Duplicated call: EventId {event_id} seen {record['copies']} times",
+                        severity="warning", plate=record["plate"], spot=record["spot"],
+                        source=source, copies=record["copies"], event_class=record["event_class"])
+        return payload, "duplicate", "duplicate EventId"
+
+    # --- replay of an old batch ------------------------------------------
+    server_dt = parse_sim_time(payload.get("ServerDateTime"))
+    if server_dt and _last_sim_time is not None:
+        skew = (server_dt - _last_sim_time).total_seconds()
+        if skew < -INTEGRITY_CLOCK_SKEW_SECONDS:
+            # Reloading a level rewinds the simulator clock, so a big jump backwards
+            # is normal and must not stop the park. Replays are caught by the EventId
+            # and SequenceId checks instead; this is recorded, not rejected.
+            _log_integrity("clock_jump", f"ServerDateTime is {abs(skew):.0f}s behind the "
+                                         f"previous webhook", payload, source, event_id, "warning")
+            record_incident("integrity_warning",
+                            "Simulator clock jumped backwards (level reload?); re-baselining",
+                            severity="warning", plate=payload.get("CarPlateNumber"),
+                            source=source, skew_seconds=round(skew, 1))
+
+    # --- unknown target ---------------------------------------------------
+    # The map is discovered at runtime and can change between levels, so an
+    # unrecognised name is reported but still processed: dropping it would blind
+    # the backend to a spot it has simply not learned about yet.
+    bad_field = _unknown_target_field(payload)
+    if bad_field:
+        _log_integrity("unknown_target",
+                       f"{bad_field}={payload.get(bad_field)!r} is not part of the known map",
+                       payload, source, event_id, "warning")
+        record_incident("integrity_warning",
+                        f"Webhook names an unknown {bad_field}: {payload.get(bad_field)!r}",
+                        severity="warning", source=source, field=bad_field)
+
+    plate = payload.get("CarPlateNumber") or payload.get("CarPlate")
+    if plate is not None and str(plate) and not PLATE_RE.match(str(plate)):
+        _log_integrity("invalid_field", f"CarPlateNumber {plate!r} is not a usable plate", payload,
+                       source, event_id, "critical")
+        record_incident("integrity_rejected", f"Webhook with an invalid plate {plate!r}",
+                        severity="critical", source=source)
+        return payload, "invalid_field", "invalid plate"
+
+    # --- accepted: remember it, then check ordering ------------------------
+    if event_id is not None:
+        _remember_event_id(event_id)
+
+    try:
+        sequence_id = int(payload["SequenceId"])
+    except (KeyError, TypeError, ValueError):
+        sequence_id = None
+    if sequence_id is not None:
+        if _last_sequence_id is not None and sequence_id <= _last_sequence_id:
+            _log_integrity("out_of_order", f"SequenceId {sequence_id} is not newer than "
+                                           f"{_last_sequence_id}", payload, source, event_id, "warning")
+            record_incident("integrity_warning",
+                            f"Out-of-order SequenceId {sequence_id} (last {_last_sequence_id}); "
+                            f"processed but flagged",
+                            severity="warning", plate=plate, source=source)
+        elif _last_sequence_id is not None and sequence_id > _last_sequence_id + 1:
+            missed = sequence_id - _last_sequence_id - 1
+            _log_integrity("gap", f"{missed} event(s) missed before SequenceId {sequence_id}",
+                           payload, source, event_id, "warning")
+            record_incident("integrity_warning", f"{missed} simulator event(s) were never delivered",
+                            severity="warning", source=source, missed=missed,
+                            last=_last_sequence_id, got=sequence_id)
+        _last_sequence_id = max(sequence_id, _last_sequence_id or sequence_id)
+
+    integrity_stats["accepted"] += 1
+    return payload, None, None
+
+
+# =================================================================
+# ORDERED EVENT DISPATCHER
+# =================================================================
+#
+# Simulator events arrive in bursts (everybody leaves at once after a CO alert).
+# Handling them with a bare create_task loses ordering: a car's CarOut can be
+# processed before its CarIn, which corrupts the spot state.
+#
+# dispatch() keeps ONE FIFO queue per key (the plate, or the spot for events
+# with no plate). Work for the same key runs strictly in arrival order; work for
+# different keys runs concurrently. Enqueueing is synchronous, so the order a
+# webhook arrives in is the order it is queued in.
+
+DISPATCH_MAX_PER_KEY = 250    # one car should never have this many pending events
+
+_dispatch_queues: dict[str, deque] = {}
+_dispatch_workers: dict[str, asyncio.Task] = {}
+dispatch_stats: Counter = Counter()
+_dispatch_peak_depth = 0
+
+
+async def _dispatch_drain(key: str) -> None:
+    queue = _dispatch_queues.get(key)
+    try:
+        while queue:
+            factory, label = queue.popleft()
+            try:
+                await factory()
+                dispatch_stats["completed"] += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                dispatch_stats["failed"] += 1
+                print(f"[DISPATCH ERROR] {label} for {key}: {exc}")
+                record_incident("integrity_warning", f"Event handler failed: {label}",
+                                severity="warning", error=str(exc)[:200], key=key)
+    finally:
+        _dispatch_queues.pop(key, None)
+        _dispatch_workers.pop(key, None)
+
+
+def dispatch(key: str, factory, label: str = "event") -> bool:
+    """Queue async work for `key`, preserving arrival order. False if it was dropped."""
+    global _dispatch_peak_depth
+    key = key or "global"
+    queue = _dispatch_queues.setdefault(key, deque())
+    if len(queue) >= DISPATCH_MAX_PER_KEY:
+        dispatch_stats["dropped"] += 1
+        record_incident("integrity_warning",
+                        f"Event backlog for {key} exceeded {DISPATCH_MAX_PER_KEY}; dropped {label}",
+                        severity="critical", key=key)
+        return False
+    queue.append((factory, label))
+    dispatch_stats["queued"] += 1
+    _dispatch_peak_depth = max(_dispatch_peak_depth, len(queue))
+    if key not in _dispatch_workers:
+        _dispatch_workers[key] = asyncio.create_task(_dispatch_drain(key))
+    return True
+
+
+def dispatch_depth() -> int:
+    return sum(len(q) for q in _dispatch_queues.values())
+
+
+# =================================================================
+# RESPONSE CACHE  (dashboard under load)
+# =================================================================
+#
+# The dashboard polls several endpoints every few seconds, from every open tab.
+# Without this, 20 tabs = 20 simulator round-trips per endpoint per tick, and
+# each list-* call has a simulated operating cost.
+#
+# Each entry is computed at most once per TTL, and concurrent callers wait on
+# the SAME computation (single flight) instead of each starting their own.
+
+class TTLCache:
+    def __init__(self) -> None:
+        self._values: dict[str, tuple[float, object]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self.hits = 0
+        self.misses = 0
+
+    async def get(self, key: str, ttl: float, producer):
+        hit = self._values.get(key)
+        if hit and time.monotonic() - hit[0] < ttl:
+            self.hits += 1
+            return hit[1]
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            hit = self._values.get(key)      # another caller may have filled it while we waited
+            if hit and time.monotonic() - hit[0] < ttl:
+                self.hits += 1
+                return hit[1]
+            self.misses += 1
+            value = await producer()
+            self._values[key] = (time.monotonic(), value)
+            return value
+
+    def invalidate(self, key: str) -> None:
+        self._values.pop(key, None)
+
+    def stats(self) -> dict:
+        total = self.hits + self.misses
+        return {"hits": self.hits, "misses": self.misses, "entries": len(self._values),
+                "hit_rate": round(self.hits / total, 3) if total else 0.0}
+
+
+response_cache = TTLCache()
+
+CACHE_TTL_SPOTS = 2.0     # /list-parking-spots, the heaviest dashboard call
+CACHE_TTL_STATUS = 2.0    # /system-status
+CACHE_TTL_SIM_LIST = 5.0  # simulator passthrough lists
+
+
+def parse_sim_time(value) -> datetime | None:
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+
+
+_last_sim_time: datetime | None = None
+
+
+# =================================================================
+# SPOT SENSOR HEALTH & MAINTENANCE MODE
+# =================================================================
+#
+# A spot sensor that lies costs real capacity: a stuck "occupied" blocks a good
+# spot forever, and a stuck "free" sends a second car into an occupied one
+# (which the simulator penalises). We watch each spot's own event stream and
+# quarantine it as soon as it stops making sense, rather than waiting for the
+# simulator's own alarm.
+
+SENSOR_FLAP_WINDOW = 60.0            # seconds
+SENSOR_FLAP_LIMIT = 6                # state changes in the window before we distrust it
+SENSOR_QUARANTINE_SECONDS = 300.0    # auto maintenance is reviewed after this long
+SENSOR_STUCK_SECONDS = 1800.0        # "occupied" with no vehicle for this long is a stuck sensor
+
+# name -> {"transitions": deque, "faults", "last_direction", "last_plate", "last_at", "last_fault"}
+spot_sensor: dict[str, dict] = {}
+# name -> {"reason", "by", "since", "auto"}  — spots withdrawn from allocation
+maintenance_mode: dict[str, dict] = {}
+
+
+def _sensor(name: str) -> dict:
+    return spot_sensor.setdefault(name, {
+        "transitions": deque(maxlen=SENSOR_FLAP_LIMIT * 2),
+        "faults": 0, "last_direction": None, "last_plate": None,
+        "last_at": 0.0, "last_fault": None,
+    })
+
+
+def spot_is_serviceable(name: str) -> bool:
+    """A spot may be allocated only if it is healthy and not in maintenance."""
+    if name in maintenance_mode:
+        return False
+    health = component_health.get(name, {})
+    return not health.get("broken") and not health.get("under_maintenance")
+
+
+async def set_maintenance_mode(name: str, on: bool, *, reason: str, actor: str | None = None,
+                               auto: bool = False) -> dict:
+    """Withdraw a spot from availability (or return it). Audited either way."""
+    if on:
+        maintenance_mode[name] = {
+            "reason": reason,
+            "by": actor or ("automatic" if auto else "operator"),
+            "since": time.time(),
+            "since_text": sim_now().strftime("%Y-%m-%d %H:%M:%S"),
+            "auto": auto,
+        }
+        async with spot_lock:
+            if name in parking_spots:
+                parking_spots[name] = False
+        record_incident("spot_maintenance", f"{name} taken out of service: {reason}",
+                        severity="warning", spot=name, actor=actor, target_type="spot", auto=auto)
+    else:
+        previous = maintenance_mode.pop(name, None)
+        health = component_health.get(name, {})
+        if name in parking_spots and not health.get("broken") and not health.get("under_maintenance"):
+            detail = spot_details.get(name, {})
+            occupied = detail.get("isOccupied", False) or bool(detail.get("detectedCars"))
+            async with spot_lock:
+                assigned = any(c.get("assigned_spot") == name for c in active_cars.values())
+                parking_spots[name] = not (occupied or assigned)
+        _sensor(name)["faults"] = 0
+        record_incident("spot_maintenance", f"{name} returned to service", severity="info",
+                        spot=name, actor=actor, target_type="spot",
+                        was=(previous or {}).get("reason"))
+    response_cache.invalidate("spots")
+    return {"spot": name, "maintenance": on, "reason": reason}
+
+
+def note_sensor_reading(name: str, direction: str, plate: str | None, believed_free: bool) -> str | None:
+    """Record one spot sensor event; returns a fault description, or None if it looks sane."""
+    if name not in parking_spots:
+        return None
+    sensor = _sensor(name)
+    now = time.time()
+    fault = None
+
+    if direction == "CarIn" and not plate:
+        fault = "occupancy reported without a vehicle identity"
+    elif direction == "CarIn" and sensor["last_direction"] == "CarIn" and sensor["last_plate"] != plate:
+        fault = (f"second CarIn without a CarOut "
+                 f"(had {sensor['last_plate'] or 'unknown'}, now {plate or 'unknown'})")
+    elif direction == "CarOut" and believed_free and sensor["last_direction"] != "CarIn":
+        fault = "CarOut from a spot the sensor never reported occupied"
+
+    if direction in ("CarIn", "CarOut"):
+        sensor["transitions"].append(now)
+        window = [t for t in sensor["transitions"] if now - t <= SENSOR_FLAP_WINDOW]
+        if len(window) >= SENSOR_FLAP_LIMIT:
+            fault = fault or f"sensor flapping: {len(window)} changes in {SENSOR_FLAP_WINDOW:.0f}s"
+        sensor["last_direction"] = direction
+        sensor["last_plate"] = plate
+        sensor["last_at"] = now
+
+    if fault:
+        sensor["faults"] += 1
+        sensor["last_fault"] = fault
+    return fault
+
+
+async def handle_sensor_fault(name: str, fault: str) -> None:
+    """One abnormal reading is noted; a repeat takes the spot out of service."""
+    sensor = _sensor(name)
+    record_incident("sensor_abnormal", f"{name}: {fault}", severity="warning", spot=name,
+                    target_type="spot", faults=sensor["faults"])
+    if sensor["faults"] >= 2 and name not in maintenance_mode:
+        await set_maintenance_mode(name, True, reason=f"sensor abnormality ({fault})", auto=True)
+        try:
+            await call_simulator_api(f"parking-spots/{name}/repair", method="POST")
+            await audit_system("AUTO_REPAIR", "spot", name, reason="sensor abnormality")
+        except Exception as exc:
+            print(f"[SENSOR] Repair request for {name} failed: {exc}")
+
+
+async def sensor_review_worker() -> None:
+    """Return auto-quarantined spots to service once the simulator says they are healthy,
+    and quarantine spots reported occupied by nobody for far too long."""
+    print("[SENSOR REVIEW] Spot sensor supervisor started.")
+    while True:
+        await asyncio.sleep(30.0)
+        now = time.time()
+        try:
+            for name, entry in list(maintenance_mode.items()):
+                if not entry.get("auto") or now - entry["since"] < SENSOR_QUARANTINE_SECONDS:
+                    continue
+                health = component_health.get(name, {})
+                detail = spot_details.get(name, {})
+                if health.get("broken") or health.get("under_maintenance") or detail.get("broken"):
+                    continue
+                if now - _sensor(name)["last_at"] < SENSOR_FLAP_WINDOW:
+                    continue   # still moving; give it another cycle
+                await set_maintenance_mode(name, False, reason="sensor stable again", auto=True)
+
+            for name, detail in list(spot_details.items()):
+                if name not in parking_spots or name in maintenance_mode:
+                    continue
+                if not (detail.get("isOccupied", False) or detail.get("detectedCars")):
+                    continue
+                known = any(c.get("parked_spot") == name or c.get("assigned_spot") == name
+                            for c in active_cars.values())
+                sensor = _sensor(name)
+                if not known and sensor["last_at"] and now - sensor["last_at"] > SENSOR_STUCK_SECONDS:
+                    sensor["faults"] += 1
+                    await handle_sensor_fault(
+                        name, f"occupied with no vehicle for {SENSOR_STUCK_SECONDS / 60:.0f} minutes")
+        except Exception as exc:
+            print(f"[SENSOR REVIEW ERROR] {exc}")
+
+
+# =================================================================
+# VEHICLE LOCATION & DOUBLE PARKING
+# =================================================================
+#
+# vehicle_tracks answers "where is this car?", including cars that ignored their
+# assignment. It is built from the sensor stream, so it also catches a plate
+# holding two spots at once (double parking) as soon as the second CarIn
+# arrives — before the simulator issues its penalty.
+
+# plate -> {"spots": {name: since}, "last_seen", "last_event", "last_spot", "zone", "history"}
+vehicle_tracks: dict[str, dict] = {}
+double_parking: dict[str, dict] = {}   # plate (or "spot:<name>") -> open warning
+
+
+def _track(plate: str) -> dict:
+    return vehicle_tracks.setdefault(plate, {
+        "spots": {}, "last_seen": 0.0, "last_event": None, "last_spot": None,
+        "zone": None, "history": deque(maxlen=25),
+    })
+
+
+def note_vehicle_position(plate: str, spot: str | None, event: str, at_text: str = "") -> None:
+    if not plate:
+        return
+    track = _track(plate)
+    track["last_seen"] = time.time()
+    track["last_event"] = event
+    if spot:
+        track["last_spot"] = spot
+        track["zone"] = zone_of_spot(spot) or zone_of_gate(gate_for_entry_spot(spot)) or track["zone"]
+    track["history"].append({
+        "event": event, "spot": spot,
+        "at": at_text or sim_now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+
+
+async def note_vehicle_parked(plate: str, spot: str) -> None:
+    """Car detected in `spot`. Raises an early warning if it already holds another one."""
+    if not plate or spot not in parking_spots:
+        return
+    track = _track(plate)
+    others = [s for s in track["spots"] if s != spot]
+    track["spots"][spot] = time.time()
+    note_vehicle_position(plate, spot, "parked")
+
+    assigned = (active_cars.get(plate) or {}).get("assigned_spot")
+    if assigned and assigned != spot and assigned in parking_spots:
+        record_incident("vehicle_misparked",
+                        f"{plate} parked in {spot} but was assigned {assigned}",
+                        severity="warning", plate=plate, spot=spot, assigned=assigned)
+        async with spot_lock:
+            still_held = any(c.get("parked_spot") == assigned for c in active_cars.values())
+            if not still_held and assigned not in maintenance_mode:
+                parking_spots[assigned] = True   # give the abandoned reservation back
+        response_cache.invalidate("spots")
+
+    if others:
+        held = sorted([*others, spot])
+        warning = {
+            "plate": plate,
+            "spots": held,
+            "zones": sorted({zone_of_spot(s) or "?" for s in held}),
+            "since": time.time(),
+            "since_text": sim_now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        double_parking[plate] = warning
+        record_incident("double_parking",
+                        f"{plate} occupies {len(held)} spots at once: {', '.join(held)}",
+                        severity="critical", plate=plate, spot=spot,
+                        spots=held, zones=warning["zones"])
+
+
+def note_vehicle_left_spot(plate: str, spot: str) -> None:
+    if not plate:
+        return
+    track = _track(plate)
+    track["spots"].pop(spot, None)
+    note_vehicle_position(plate, spot, "left spot")
+    if plate in double_parking and len(track["spots"]) <= 1:
+        double_parking.pop(plate, None)
+        record_incident("double_parking", f"{plate} is no longer double parked", severity="info",
+                        plate=plate, spot=spot)
+
+
+def note_double_parked_spot(name: str, detected: int) -> None:
+    """The simulator reports more than one car in one spot."""
+    key = f"spot:{name}"
+    if key in double_parking:
+        return
+    double_parking[key] = {
+        "spot": name, "cars": detected, "spots": [name],
+        "zones": [zone_of_spot(name) or "?"], "since": time.time(),
+        "since_text": sim_now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    record_incident("double_parking", f"{name} reports {detected} vehicles in one spot",
+                    severity="critical", spot=name, detected=detected)
+
+
+def _sensor_spots_for_plate(plate: str) -> list[str]:
+    """Spots the simulator itself says hold this plate (ground truth)."""
+    wanted = plate.upper()
+    found = []
+    for name, detail in spot_details.items():
+        if str(detail.get("carPlateNumber") or "").upper() == wanted:
+            found.append(name)
+            continue
+        cars = detail.get("detectedCars") or []
+        if isinstance(cars, list) and any(str(c).upper() == wanted for c in cars):
+            found.append(name)
+    return sorted(found)
+
+
+def locate_vehicle(plate: str) -> dict:
+    """Best known position of one car, with the evidence behind it.
+
+    Works for cars that never reached their assigned spot: the answer says what
+    the assignment was and where the car actually is.
+    """
+    plate = (plate or "").strip()
+    track = vehicle_tracks.get(plate) or next(
+        (t for p, t in vehicle_tracks.items() if p.upper() == plate.upper()), None)
+    car = active_cars.get(plate) or next(
+        (c for p, c in active_cars.items() if p.upper() == plate.upper()), None)
+
+    occupied = sorted((track or {}).get("spots", {}))
+    for name in _sensor_spots_for_plate(plate):     # sensor truth beats our bookkeeping
+        if name not in occupied:
+            occupied.append(name)
+
+    assigned = (car or {}).get("assigned_spot")
+    parked = (car or {}).get("parked_spot")
+    where = parked or (occupied[0] if occupied else None)
+
+    if where:
+        state = "parked"
+        confidence = "confirmed" if parked or occupied else "sensor"
+    elif car and car.get("charged"):
+        state, confidence = "at exit", "tracked"
+        where = (track or {}).get("last_spot")
+    elif car:
+        state, confidence = "driving to spot", "assigned"
+        where = assigned
+    elif track:
+        state, confidence = "last seen", "historic"
+        where = track.get("last_spot")
+    else:
+        return {"found": False, "plate": plate,
+                "message": f"No live position for {plate}; try the vehicle history."}
+
+    zone = zone_of_spot(where or "") or (track or {}).get("zone")
+    history = list((track or {}).get("history", []))
+    return {
+        "found": True,
+        "plate": plate,
+        "state": state,
+        "confidence": confidence,
+        "location": where or "unknown",
+        "zone": zone,
+        "zone_label": (ZONES.get(zone or "") or {}).get("label"),
+        "assigned_spot": assigned,
+        "in_assigned_spot": bool(where and assigned and where == assigned),
+        "occupies": occupied,
+        "double_parked": len(occupied) > 1,
+        "vehicle_type": (car or {}).get("car_type"),
+        "charged": bool((car or {}).get("charged")),
+        "entry_time": (car or {}).get("entry_time"),
+        "last_seen_text": history[-1]["at"] if history else None,
+        "history": history[-10:],
+    }
+
+
+# =================================================================
+# PAYMENT VERIFICATION
+# =================================================================
+#
+# The simulator can emit payment events we never asked for, for amounts we never
+# charged. A visit is settled only when the simulator ACCEPTS our own /charge
+# call for the amount we calculated. Anything else is suspicious: we void what we
+# had, raise an incident, and ask for payment again.
+
+MAX_PAYMENT_ATTEMPTS = 3
+PAYMENT_RETRY_BACKOFF = 1.0
+PAYMENT_AMOUNT_TOLERANCE = 0.01
+
+# plate -> {"expected", "parking", "charging", "attempts", "confirmed", "suspicions": [...]}
+payment_state: dict[str, dict] = {}
+
+
+def _payment(plate: str) -> dict:
+    return payment_state.setdefault(plate, {
+        "expected": 0.0, "parking": 0.0, "charging": 0.0, "attempts": 0,
+        "confirmed": False, "suspicions": [], "last_attempt": 0.0,
+    })
+
+
+def payment_is_settled(plate: str) -> bool:
+    return bool(payment_state.get(plate, {}).get("confirmed")) or plate in charged_cars
+
+
+async def charge_with_verification(plate: str, parking_cost: float, charging_cost: float,
+                                   reason: str = "exit", minutes: float = 0.0,
+                                   at: datetime | None = None) -> bool:
+    """Charge a car and only treat it as paid once the simulator accepts the call.
+
+    Retries a failed charge, and is a no-op if the visit is already settled (the
+    simulator penalises a second charge for the same visit).
+    """
+    state = _payment(plate)
+    if state["confirmed"]:
+        print(f"[PAYMENT] {plate} already settled; not charging again.")
+        return True
+
+    expected = round(float(parking_cost) + float(charging_cost), 2)
+    state.update(expected=expected, parking=float(parking_cost), charging=float(charging_cost))
+
+    for attempt in range(1, MAX_PAYMENT_ATTEMPTS + 1):
+        state["attempts"] += 1
+        state["last_attempt"] = time.time()
+        try:
+            await api_charge_car(plate, parking_cost, charging_cost)
+        except Exception as exc:
+            print(f"[PAYMENT] Charge attempt {attempt}/{MAX_PAYMENT_ATTEMPTS} for {plate} failed: {exc}")
+            if attempt == MAX_PAYMENT_ATTEMPTS:
+                record_incident("payment_suspicious",
+                                f"Charge for {plate} failed {MAX_PAYMENT_ATTEMPTS} times: {exc}",
+                                severity="critical", plate=plate, expected=expected, cause=reason)
+                return False
+            record_incident("payment_retry",
+                            f"Asking {plate} for payment again (attempt {attempt + 1}): {exc}",
+                            severity="warning", plate=plate, expected=expected, attempt=attempt)
+            await asyncio.sleep(PAYMENT_RETRY_BACKOFF * attempt)
+            continue
+
+        state["confirmed"] = True
+        charged_cars.add(plate)
+        if plate in active_cars:
+            active_cars[plate]["charged"] = True
+        record_incident("payment_settled", f"{plate} paid {expected:.2f} ({reason})",
+                        severity="info", plate=plate, parking=float(parking_cost),
+                        charging=float(charging_cost), attempts=state["attempts"])
+        car_type = normalize_vehicle_type((active_cars.get(plate) or {}).get("car_type", "Normal"))
+        asyncio.create_task(store_charge_async(plate, float(parking_cost), float(charging_cost),
+                                               minutes, car_type, at))
+        return True
+    return False
+
+
+async def review_payment_event(payload: dict) -> None:
+    """A `payment_made` webhook arrived. Accept it only if it matches our own charge."""
+    plate = payload.get("CarPlateNumber") or payload.get("CarPlate") or ""
+    if not plate:
+        record_incident("payment_suspicious", "Payment event without a plate", severity="warning")
+        return
+    state = payment_state.get(plate)
+    try:
+        amount = round(float(payload.get("Amount")), 2)
+    except (TypeError, ValueError):
+        amount = None
+
+    if state is None or not state["attempts"]:
+        record_incident("payment_suspicious",
+                        f"Payment event for {plate}, which we never charged",
+                        severity="critical", plate=plate, amount=amount)
+        return
+    if amount is None:
+        suspicion = "payment event without a usable Amount"
+    elif abs(amount - state["expected"]) > PAYMENT_AMOUNT_TOLERANCE:
+        suspicion = f"paid {amount:.2f} but we charged {state['expected']:.2f}"
+    elif state.get("settled_event"):
+        suspicion = "second payment event for the same visit"
+    else:
+        state["settled_event"] = True
+        record_incident("payment_settled", f"Payment event for {plate} matches our charge",
+                        severity="info", plate=plate, amount=amount)
+        return
+
+    state["suspicions"].append(suspicion)
+    state["confirmed"] = False
+    charged_cars.discard(plate)
+    if plate in active_cars:
+        active_cars[plate]["charged"] = False
+    record_incident("payment_suspicious", f"{plate}: {suspicion}", severity="critical",
+                    plate=plate, amount=amount, expected=state["expected"])
+
+    if state["attempts"] < MAX_PAYMENT_ATTEMPTS:
+        record_incident("payment_retry",
+                        f"Asking {plate} for payment again after a suspicious payment",
+                        severity="warning", plate=plate)
+        await charge_with_verification(plate, state["parking"], state["charging"],
+                                       reason="suspicious payment")
+    else:
+        record_incident("payment_suspicious",
+                        f"{plate} exhausted {MAX_PAYMENT_ATTEMPTS} payment attempts; held at exit",
+                        severity="critical", plate=plate)
+
+
+# =================================================================
+# GATE FAILURE TRACKING
+# =================================================================
+#
+# A gate that keeps refusing commands is treated as failed even when no
+# component_broken webhook arrived, so its zone's traffic moves to another gate
+# instead of piling up behind it. One command is let through periodically to
+# probe whether it has recovered.
+
+GATE_FAILURE_LIMIT = 3
+GATE_PROBE_SECONDS = 120.0
+
+gate_failures: dict[str, dict] = {}   # gate -> {"count", "since", "reason", "last"}
+
+
+def note_gate_failure(gate: str, reason: str) -> None:
+    entry = gate_failures.setdefault(gate, {"count": 0, "since": time.time(), "reason": reason})
+    entry["count"] += 1
+    entry["reason"] = reason
+    entry["last"] = time.time()
+    if entry["count"] == GATE_FAILURE_LIMIT:
+        record_incident("gate_failover", f"{gate} failed {entry['count']} times: {reason}",
+                        severity="critical", gate=gate, target_type="gate")
+
+
+def note_gate_success(gate: str) -> None:
+    if gate_failures.pop(gate, None):
+        record_incident("gate_failover", f"{gate} is answering again", severity="info",
+                        gate=gate, target_type="gate")
+
+
+def gate_presumed_failed(gate: str) -> bool:
+    entry = gate_failures.get(gate)
+    if not entry or entry["count"] < GATE_FAILURE_LIMIT:
+        return False
+    if time.time() - entry.get("last", 0) > GATE_PROBE_SECONDS:
+        entry["count"] = GATE_FAILURE_LIMIT - 1   # let one command through to probe it
+        return False
+    return True
+
+
+# -------------------------------------------------
+# RUNTIME LAYOUT DISCOVERY
+# -------------------------------------------------
+#
+# ZONE_DEFS above is only the Level 2 fallback. Every level has a different map
+# (Level 3 has more zones, more spots and more gates), so the real layout is read
+# from the simulator at startup:
+#
+#   GET /list-parking-spots -> name, purpose (Park/EntrySpot/ExitSpot),
+#                              parkingForCarType, zoneParent
+#   GET /list-barriers      -> name, zoneParent, state
+#
+# Spots and gates are grouped by zoneParent. Within a zone, gates are paired with
+# that zone's EntrySpots first and ExitSpots second, in name order — the same
+# convention Level 2 uses (gate1/ENTRY1, gate2/EXIT1). ENTRY_GATE / EXIT_GATE in
+# .env override the pairing for any gate they name.
+#
+# Gates with no zone of their own (Level 3's gate7 and gate19) are not part of the
+# car routing; they are listed in OTHER_GATES and handled by ALWAYS_OPEN_GATES.
+
+# Gates held open from startup and never auto-closed. Comma-separated in .env as
+# ALWAYS_OPEN_GATES; these are the Level 3 through-gates.
+ALWAYS_OPEN_GATES: list[str] = [
+    g.strip() for g in str(getattr(get_settings(), "always_open_gates", "gate7,gate19")).split(",")
+    if g.strip()
+]
+
+OTHER_GATES: list[str] = []
+layout_source: str = "static (Level 2 fallback)"
+layout_discovered_at: str | None = None
+
+
+def _numeric_key(name: str) -> tuple:
+    """Sort gate7 before gate19 (and ENTRY2 before ENTRY10)."""
+    digits = "".join(ch for ch in name if ch.isdigit())
+    return (int(digits) if digits else 9999, name)
+
+
+def _zone_label(zone_id: str, index: int) -> str:
+    match = re.match(r"^zone\s*(\d+)$", zone_id.strip(), re.IGNORECASE)
+    return f"Zone {match.group(1)}" if match else (zone_id.title() if zone_id else f"Zone {index}")
+
+
+def build_zone_defs(sim_spots: list[dict], sim_barriers: list[dict]) -> list[dict]:
+    """Turn the simulator's own spot and barrier lists into ZONE_DEFS."""
+    settings = get_settings()
+    # ENTRY_GATE / EXIT_GATE default to the Level 2 gate names. Applying those to a
+    # different level would mis-label its gates, so they only override the pairing
+    # when they were actually set (in .env or the environment).
+    def _configured(field: str) -> set[str]:
+        value = str(getattr(settings, field, "") or "")
+        if value == Settings.model_fields[field].default:
+            return set()
+        return {g.strip() for g in value.split(",") if g.strip()}
+
+    forced_entry = _configured("entry_gate")
+    forced_exit = _configured("exit_gate")
+
+    # dict, not list: the simulator may repeat a name, and a spot must be counted once.
+    park: dict[str, dict[str, None]] = defaultdict(dict)
+    entries: dict[str, dict[str, None]] = defaultdict(dict)
+    exits: dict[str, dict[str, None]] = defaultdict(dict)
+    car_types: dict[str, dict[str, str]] = defaultdict(dict)
+
+    for item in sim_spots:
+        name = (item or {}).get("name")
+        if not name:
+            continue
+        zone = str(item.get("zoneParent") or "").upper() or "ZONE1"
+        purpose = str(item.get("purpose") or "Park")
+        if purpose == "EntrySpot":
+            entries[zone][name] = None
+        elif purpose == "ExitSpot":
+            exits[zone][name] = None
+        else:
+            park[zone][name] = None
+            kind = str(item.get("parkingForCarType") or "Any")
+            if kind in ("Electric", "Accessible"):
+                car_types[zone][name] = kind
+
+    gates_by_zone: dict[str, dict[str, None]] = defaultdict(dict)
+    zoneless: dict[str, None] = {}
+    for item in sim_barriers:
+        name = (item or {}).get("name")
+        if not name:
+            continue
+        zone = str(item.get("zoneParent") or "").upper()
+        if zone:
+            gates_by_zone[zone][name] = None
+        else:
+            zoneless[name] = None
+
+    zone_ids = sorted(set(park) | set(entries) | set(exits) | set(gates_by_zone), key=_numeric_key)
+    built: list[dict] = []
+    for index, zone_id in enumerate(zone_ids, start=1):
+        spots = sorted(park.get(zone_id, {}), key=_numeric_key)
+        if not spots:
+            continue  # a zone with no parking spots is not a parking zone
+        zone_entries = sorted(entries.get(zone_id, {}), key=_numeric_key)
+        zone_exits = sorted(exits.get(zone_id, {}), key=_numeric_key)
+        gates = sorted(gates_by_zone.get(zone_id, {}), key=_numeric_key)
+
+        # .env may name a gate explicitly; otherwise the first gates serve the
+        # EntrySpots and the rest serve the ExitSpots, both in name order.
+        named_entry = [g for g in gates if g in forced_entry]
+        named_exit = [g for g in gates if g in forced_exit]
+        rest = [g for g in gates if g not in forced_entry and g not in forced_exit]
+        wanted_entrances = max(len(zone_entries) - len(named_entry), 0)
+        entrance_gates = named_entry + rest[:wanted_entrances]
+        exit_gates = named_exit + rest[wanted_entrances:]
+
+        built.append({
+            "id": zone_id,
+            "label": _zone_label(zone_id, index),
+            "spots": spots,
+            "entrances": entrance_gates,
+            "exits": exit_gates,
+            "entry_spots": {g: zone_entries[i] if i < len(zone_entries) else (zone_entries[-1] if zone_entries else "ENTRY1")
+                            for i, g in enumerate(entrance_gates)},
+            "exit_spots": {g: zone_exits[i] if i < len(zone_exits) else (zone_exits[-1] if zone_exits else "EXIT1")
+                           for i, g in enumerate(exit_gates)},
+            "car_types": car_types.get(zone_id, {}),
+        })
+
+    globals()["OTHER_GATES"] = sorted(zoneless, key=_numeric_key)
+    return built
+
+
+def apply_zone_defs(new_defs: list[dict], source: str) -> None:
+    """Replace the zone registry and every table derived from it, in place.
+
+    Called once at startup. Mutating the existing dicts (rather than rebinding
+    them) keeps any module-level reference already handed out valid.
+    """
+    global ZONE_DEFS, ZONES, VALID_PARKING_SPOTS, SPOT_ZONE, ZONE_CAPACITY
+    global ENTRANCE_GATES, EXIT_GATES, ALL_GATES, GATE_ZONE
+    global GATE_ENTRY_SPOT, GATE_EXIT_SPOT, ENTRY_SPOT_GATE, EXIT_SPOT_GATE, ENTRY_SPOTS
+    global SPOT_CAR_TYPES, layout_source, layout_discovered_at
+
+    ZONE_DEFS = new_defs
+    ZONES = {z["id"]: z for z in ZONE_DEFS}
+    VALID_PARKING_SPOTS = [s for z in ZONE_DEFS for s in z["spots"]]
+    SPOT_ZONE = {s: z["id"] for z in ZONE_DEFS for s in z["spots"]}
+    ZONE_CAPACITY = {z["id"]: len(z["spots"]) for z in ZONE_DEFS}
+    ENTRANCE_GATES = [g for z in ZONE_DEFS for g in z["entrances"]]
+    EXIT_GATES = [g for z in ZONE_DEFS for g in z["exits"]]
+    ALL_GATES = ENTRANCE_GATES + EXIT_GATES + [g for g in OTHER_GATES
+                                               if g not in ENTRANCE_GATES and g not in EXIT_GATES]
+    GATE_ZONE = {g: z["id"] for z in ZONE_DEFS for g in z["entrances"] + z["exits"]}
+    GATE_ENTRY_SPOT = {g: n for z in ZONE_DEFS for g, n in z["entry_spots"].items()}
+    GATE_EXIT_SPOT = {g: n for z in ZONE_DEFS for g, n in z["exit_spots"].items()}
+    ENTRY_SPOT_GATE = {n: g for g, n in GATE_ENTRY_SPOT.items()}
+    EXIT_SPOT_GATE = {n: g for g, n in GATE_EXIT_SPOT.items()}
+    ENTRY_SPOTS = list(ENTRY_SPOT_GATE)
+    SPOT_CAR_TYPES = {s: k for z in ZONE_DEFS for s, k in z["car_types"].items()}
+
+    # Runtime state that is keyed by spot / gate / entry spot.
+    for name in list(parking_spots):
+        if name not in SPOT_ZONE:
+            parking_spots.pop(name)
+    for name in VALID_PARKING_SPOTS:
+        parking_spots.setdefault(name, True)
+
+    for gate in ALL_GATES:
+        gate_queues.setdefault(gate, asyncio.Queue())
+    for entry_name in ENTRY_SPOTS:
+        entry_occupied.setdefault(entry_name, False)
+        entry_car.setdefault(entry_name, None)
+        entry_occupied_since.setdefault(entry_name, 0.0)
+        entry_queues.setdefault(entry_name, asyncio.Queue())
+
+    layout_source = source
+    layout_discovered_at = sim_now().strftime("%Y-%m-%d %H:%M:%S")
+    response_cache.invalidate("spots")
+
+
+async def discover_layout() -> bool:
+    """Read the current level's map from the simulator. False = keep the fallback."""
+    try:
+        sim_spots, sim_barriers = await asyncio.gather(
+            call_simulator_api("list-parking-spots"),
+            call_simulator_api("list-barriers"),
+        )
+    except Exception as exc:
+        print(f"[LAYOUT] Could not read the map from the simulator: {exc}")
+        print(f"[LAYOUT] Keeping the built-in fallback ({len(VALID_PARKING_SPOTS)} spots).")
+        record_incident("capacity", "Simulator map unavailable; using the built-in fallback layout",
+                        severity="warning", error=str(exc)[:200])
+        return False
+
+    if not isinstance(sim_spots, list) or not isinstance(sim_barriers, list):
+        print("[LAYOUT] Simulator returned no usable spot/barrier list; keeping the fallback.")
+        return False
+
+    new_defs = build_zone_defs(sim_spots, sim_barriers)
+    if not new_defs:
+        print("[LAYOUT] Simulator reported no parking zones; keeping the fallback.")
+        return False
+
+    apply_zone_defs(new_defs, source=f"simulator ({len(sim_spots)} spots, {len(sim_barriers)} barriers)")
+    print(f"[LAYOUT] Discovered {len(ZONE_DEFS)} zone(s) from the simulator:")
+    for zone in ZONE_DEFS:
+        print(f"[LAYOUT]   {zone['label']} ({zone['id']}): {len(zone['spots'])} spots "
+              f"{zone['spots'][0]}..{zone['spots'][-1]} | entrances {zone['entrances']} "
+              f"-> {list(zone['entry_spots'].values())} | exits {zone['exits']} "
+              f"-> {list(zone['exit_spots'].values())}")
+    if OTHER_GATES:
+        print(f"[LAYOUT]   Gates outside the zones: {OTHER_GATES}")
+    record_incident("capacity",
+                    f"Level map loaded: {len(ZONE_DEFS)} zones, {len(VALID_PARKING_SPOTS)} spots, "
+                    f"{len(ALL_GATES)} gates", severity="info",
+                    zones=[z["id"] for z in ZONE_DEFS], spots=len(VALID_PARKING_SPOTS))
+    return True
+
+
+async def open_always_open_gates() -> None:
+    """Hold the level's through-gates open from startup (Level 3: gate7, gate19).
+
+    They are marked as manual overrides so the automation never closes them again.
+    """
+    for gate in ALWAYS_OPEN_GATES:
+        try:
+            set_manual_override(gate)
+            await call_simulator_api(f"barrier-gates/{gate}/open", method="POST")
+            print(f"[STARTUP] {gate} opened and held open.")
+            await audit_system("GATE_HELD_OPEN", "gate", gate, reason="always-open gate")
+        except Exception as exc:
+            print(f"[STARTUP] Could not open {gate}: {exc}")
+            await audit_system("GATE_HELD_OPEN", "gate", gate, success=False, error=str(exc)[:200])
+            record_incident("gate_failover", f"{gate} could not be opened at startup: {exc}",
+                            severity="warning", gate=gate, target_type="gate")
+
 
 
 # -------------------------------------------------
@@ -241,22 +1559,39 @@ async def call_simulator_api(endpoint: str, method: str = "GET",
 
 
 async def is_component_operable(name: str) -> bool:
+    """A component is usable only if it is healthy, not in maintenance mode, and — for
+    gates — not one we have repeatedly failed to command (see gate_presumed_failed)."""
     h = component_health.get(name, {})
-    return not h.get("broken", False) and not h.get("under_maintenance", False)
+    if h.get("broken", False) or h.get("under_maintenance", False):
+        return False
+    if name in maintenance_mode:
+        return False
+    if name in ALL_GATES and gate_presumed_failed(name):
+        return False
+    return True
+
+
+async def _command_gate(gate_name: str, action: str):
+    """Open/close one gate, remembering whether it answered. Repeated failures take the
+    gate out of service so its zone's traffic moves to another gate (see gate_failures)."""
+    if not await is_component_operable(gate_name):
+        print(f"[SAFETY] Blocked {action} of {gate_name}: not operable.")
+        return {"status": "blocked"}
+    try:
+        result = await call_simulator_api(f"barrier-gates/{gate_name}/{action}", method="POST")
+    except Exception as exc:
+        note_gate_failure(gate_name, f"{action} failed: {str(exc)[:120]}")
+        raise
+    note_gate_success(gate_name)
+    return result
 
 
 async def api_open_barrier_gate(gate_name: str):
-    if not await is_component_operable(gate_name):
-        print(f"[SAFETY] Blocked opening {gate_name}: not operable.")
-        return {"status": "blocked"}
-    return await call_simulator_api(f"barrier-gates/{gate_name}/open", method="POST")
+    return await _command_gate(gate_name, "open")
 
 
 async def api_close_barrier_gate(gate_name: str):
-    if not await is_component_operable(gate_name):
-        print(f"[SAFETY] Blocked closing {gate_name}: not operable.")
-        return {"status": "blocked"}
-    return await call_simulator_api(f"barrier-gates/{gate_name}/close", method="POST")
+    return await _command_gate(gate_name, "close")
 
 
 async def api_send_car_to_destination(car_name: str, destination: str):
@@ -287,6 +1622,8 @@ async def send_car_to_entry_or_queue(car_plate: str, entry_name: str, assigned_s
             queue.put_nowait({"car_plate": car_plate, "assigned_spot": assigned_spot})
             return {"status": "queued", "entry": entry_name}
         entry_occupied[entry_name] = True
+        entry_car[entry_name] = car_plate
+        entry_occupied_since[entry_name] = time.time()
 
     try:
         result = await api_send_car_to_destination(car_plate, entry_name)
@@ -329,6 +1666,8 @@ async def api_charge_car(car_name: str, parking_cost: float, charging_cost: floa
 # -------------------------------------------------
 
 async def auto_close_gate_after_delay(gate_name: str, delay: float = 1.0):
+    if gate_name in ALWAYS_OPEN_GATES:
+        return   # a through-gate stays open for the whole level
     if delay > 0:
         await asyncio.sleep(delay)
     try:
@@ -356,6 +1695,8 @@ async def _redirect_entrance_car(car_plate: str, failed_gate: str, destination: 
     re-queues the car there.  Falls back to leavepark if no alternative.
     """
     operable = {gate: await is_component_operable(gate) for gate in ENTRANCE_GATES if gate != failed_gate}
+    record_incident("gate_failover", f"{failed_gate} unusable for {car_plate}; looking for another entrance",
+                    severity="warning", gate=failed_gate, plate=car_plate, target_type="gate")
     alt_spot = alt_gate = None
     async with spot_lock:
         car = active_cars.get(car_plate)
@@ -364,12 +1705,14 @@ async def _redirect_entrance_car(car_plate: str, failed_gate: str, destination: 
             car["assigned_spot"] = None
             car_type = normalize_vehicle_type(car.get("car_type", "Normal"))
             eligible_types = {"Any", car_type} if car_type != "Normal" else {"Any"}
+            # Any zone whose entrance still works will do, not just this car's original one.
             for gate in ENTRANCE_GATES:
                 if not operable.get(gate):
                     continue
                 choices = sorted(
                     (spot for spot, free in parking_spots.items()
-                     if free and spot_gate(spot) == gate and get_spot_type(spot) in eligible_types),
+                     if free and gate in entrance_gates_for_spot(spot)
+                     and get_spot_type(spot) in eligible_types and spot_is_serviceable(spot)),
                     key=extract_spot_number,
                 )
                 if choices:
@@ -454,12 +1797,18 @@ async def dedicated_exit_gate_worker(gate_name: str, queue: asyncio.Queue):
 
         # If still blocked after waiting, try the next operable exit gate.
         if not await is_component_operable(gate_name):
+            # Prefer another exit of the same zone, then any working exit anywhere.
+            same_zone = [g for g in exit_gates_for_zone(zone_of_gate(gate_name)) if g != gate_name]
             alt_exit = None
-            for g in EXIT_GATES:
+            for g in same_zone + [g for g in EXIT_GATES if g not in same_zone]:
                 if g != gate_name and await is_component_operable(g):
                     alt_exit = g
                     break
             if alt_exit:
+                record_incident("gate_failover",
+                                f"{gate_name} is blocked; {car_plate} sent to {alt_exit}",
+                                severity="warning", gate=gate_name, plate=car_plate,
+                                target_type="gate", alternative=alt_exit)
                 print(
                     f"[{gate_name.upper()} WORKER] Still blocked -> redirecting "
                     f"{car_plate} to {alt_exit}."
@@ -904,6 +2253,7 @@ async def process_waiting_entry(entry_name: str, departed_plate: str | None = No
         item = q.get_nowait()
         entry_occupied[entry_name] = True
         entry_car[entry_name] = item["car_plate"]
+        entry_occupied_since[entry_name] = time.time()
     car_plate     = item["car_plate"]
     assigned_spot = item.get("assigned_spot")
     print(f"[ENTRY QUEUE] Releasing queued {car_plate} -> {entry_name}" +
@@ -945,9 +2295,6 @@ async def process_car_entry(data: dict):
         "car_plate": car_plate, "car_type": car_type, "spot_name": spot_name,
         "parking_duration": planned_dur, "event_time": server_time, "raw_event": data,
     })
-    if len(recent_car_arrivals) > 50:
-        recent_car_arrivals.pop(0)
-
     print(f"[ENTRY] {car_plate} ({car_type}) at {spot_name}.")
 
     # RE-ENTRY GUARD: rerouted car arriving at correct gate
@@ -989,17 +2336,21 @@ async def process_car_entry(data: dict):
 
         # Reserve a spot atomically: concurrent entrance webhooks must not choose the same one.
         async with spot_lock:
-            all_free = [s for s, free in parking_spots.items() if free]
+            # A spot in maintenance mode (operator switch or sensor quarantine) is
+            # never offered, even when our own occupancy map still says it is free.
+            all_free = [s for s, free in parking_spots.items() if free and spot_is_serviceable(s)]
             eligible = []
             if norm_type == "Electric":
                 eligible += [s for s in all_free if get_spot_type(s) == "Electric"]
             elif norm_type == "Accessible":
                 eligible += [s for s in all_free if get_spot_type(s) == "Accessible"]
-            operable = [s for s in eligible if gate_operable.get(spot_gate(s))]
+            def reachable(spot: str) -> bool:
+                return any(gate_operable.get(g) for g in entrance_gates_for_spot(spot))
+
+            operable = [s for s in eligible if reachable(s)]
             if not operable:
-                operable = [s for s in all_free
-                            if get_spot_type(s) == "Any" and gate_operable.get(spot_gate(s))]
-            choices = {gate: sorted((s for s in operable if spot_gate(s) == gate),
+                operable = [s for s in all_free if get_spot_type(s) == "Any" and reachable(s)]
+            choices = {gate: sorted((s for s in operable if gate in entrance_gates_for_spot(s)),
                                     key=extract_spot_number) for gate in ENTRANCE_GATES}
             usable_gates = [gate for gate, spots in choices.items() if spots]
             if usable_gates:
@@ -1045,10 +2396,13 @@ async def process_car_entry(data: dict):
                     f"needs {target_gate} -> {target_entry}."
                 )
 
-                if current_gate == "gate3" and zone1_spots:
-                    await api_close_barrier_gate("gate3")
-                elif current_gate == "gate5" and (zone1_spots or zone2_spots):
-                    await api_close_barrier_gate("gate5")
+                # The car is leaving this gate without entering: close it behind the
+                # car so the next arrival is not admitted into the wrong zone.
+                if current_gate != target_gate:
+                    try:
+                        await api_close_barrier_gate(current_gate)
+                    except Exception as exc:
+                        print(f"[ENTRY REROUTE] Could not close {current_gate}: {exc}")
                 await send_car_to_entry_or_queue(car_plate, target_entry, assigned_spot)
         else:
             print(f"[ENTRY] No spot for {car_plate} ({norm_type}) -> leavepark.")
@@ -1086,14 +2440,13 @@ async def _precharge_car_on_departure(car_plate: str, spot_name: str):
     parking_cost  = float(max(1, round(duration)))
     charging_cost = float(parking_cost * 2.0) if is_ev else 0.0
     print(f"[PRE-CHARGE] {car_plate} departed {spot_name}: parking=${parking_cost}, EV=${charging_cost}")
-    try:
-        await api_charge_car(car_plate, parking_cost, charging_cost)
-        charged_cars.add(car_plate)
-        if car_plate in active_cars:
-            active_cars[car_plate]["charged"] = True
+    # charge_with_verification retries, records the payment, and refuses to charge a
+    # visit twice. A failure here is not fatal: the exit path asks again.
+    if await charge_with_verification(car_plate, parking_cost, charging_cost,
+                                      reason="pre-charge on departure", minutes=duration):
         print(f"[PRE-CHARGE] {car_plate} charged successfully.")
-    except Exception as e:
-        print(f"[PRE-CHARGE] {car_plate} charge failed (will retry at exit): {e}")
+    else:
+        print(f"[PRE-CHARGE] {car_plate} not settled; the exit gate will ask again.")
 
 
 async def process_car_exit(data: dict):
@@ -1150,29 +2503,18 @@ async def process_car_exit(data: dict):
         car_info = {"car_type": raw_type, "planned_duration": duration}
 
     exit_gate  = exit_gate_for_spot(spot_name)
-    payment_ok = car_plate in charged_cars
+    if car_plate in active_cars:
+        active_cars[car_plate]["billed_minutes"] = duration
+    payment_ok = payment_is_settled(car_plate)
 
     if not payment_ok:
         parking_cost  = float(max(1, math.ceil(duration)))
         charging_cost = parking_cost if is_ev else 0.0
         print(f"[EXIT] Charging {car_plate}: parking=${parking_cost}, EV=${charging_cost}")
-        # Retry up to 3 times with a short gap so transient API errors don't
-        # permanently block the gate.
-        for attempt in range(1, 4):
-            try:
-                await api_charge_car(car_plate, parking_cost, charging_cost)
-                charged_cars.add(car_plate)
-                if car_plate in active_cars:
-                    active_cars[car_plate]["charged"] = True
-                payment_ok = True
-                print(f"[EXIT] Payment confirmed for {car_plate} (attempt {attempt}).")
-                break
-            except Exception as e:
-                print(f"[EXIT] Charge attempt {attempt}/3 failed for {car_plate}: {e}")
-                if attempt < 3:
-                    await asyncio.sleep(1.0)
+        payment_ok = await charge_with_verification(car_plate, parking_cost, charging_cost,
+                                                    reason="exit", minutes=duration, at=charge_at)
     else:
-        print(f"[EXIT] {car_plate} already charged.")
+        print(f"[EXIT] {car_plate} already settled.")
 
     if payment_ok:
         freed = car_info.get("assigned_spot") or car_info.get("parked_spot")
@@ -1188,12 +2530,17 @@ async def process_car_exit(data: dict):
         # All charge attempts failed.  Rescue the car so it isn't trapped at
         # the ExitSpot forever (simulator: 'No valid escape spot found').
         print(f"[EXIT] All charge attempts failed for {car_plate} — rescuing.")
+        record_incident("payment_suspicious",
+                        f"{car_plate} left without a settled payment after "
+                        f"{MAX_PAYMENT_ATTEMPTS} attempts",
+                        severity="critical", plate=car_plate, gate=exit_gate)
         freed = car_info.get("assigned_spot") or car_info.get("parked_spot")
         if freed and freed in parking_spots:
             parking_spots[freed] = True
         if car_plate in active_cars:
             active_cars[car_plate]["assigned_spot"] = None
-        asyncio.create_task(rescue_stuck_car(car_plate, "charge failed after 3 attempts"))
+        asyncio.create_task(rescue_stuck_car(
+            car_plate, f"charge failed after {MAX_PAYMENT_ATTEMPTS} attempts"))
 
 
 # -------------------------------------------------
@@ -1292,6 +2639,10 @@ async def entry_spot_watchdog_worker():
 
 @app.on_event("startup")
 async def startup_event():
+    # The map differs per level, so read it from the simulator BEFORE starting the
+    # gate workers: the worker set and the spot table both come from it.
+    await discover_layout()
+
     for g in ENTRANCE_GATES:
         asyncio.create_task(dedicated_entrance_gate_worker(g, gate_queues[g]))
     for g in EXIT_GATES:
@@ -1301,15 +2652,25 @@ async def startup_event():
     asyncio.create_task(co_monitor_worker())
     asyncio.create_task(usage_cycle_tracker_worker())
     asyncio.create_task(entry_spot_watchdog_worker())
-    print("[STARTUP] Closing all 6 gates...")
+    asyncio.create_task(sensor_review_worker())
+    routed_gates = [g for g in ALL_GATES if g not in ALWAYS_OPEN_GATES]
+    print(f"[STARTUP] Closing {len(routed_gates)} routed gate(s)...")
     try:
         await asyncio.gather(*[
             call_simulator_api(f"barrier-gates/{g}/close", method="POST")
-            for g in ALL_GATES
+            for g in routed_gates
         ], return_exceptions=True)
     except Exception as e:
         print(f"[STARTUP NOTE] {e}")
-    print(f"[STARTUP] Level 2 ready. Entrance: {ENTRANCE_GATES} | Exit: {EXIT_GATES} | Spots: {len(VALID_PARKING_SPOTS)}")
+
+    # ...then hold the level's through-gates open (Level 3: gate7, gate19).
+    await open_always_open_gates()
+    for zone in ZONE_DEFS:
+        print(f"[STARTUP] {zone['label']}: {len(zone['spots'])} spots, "
+              f"entrances {zone['entrances']}, exits {zone['exits']}")
+    print(f"[STARTUP] Ready. Map from {layout_source}: {len(ZONE_DEFS)} zones | "
+          f"Entrance: {ENTRANCE_GATES} | Exit: {EXIT_GATES} | "
+          f"Held open: {ALWAYS_OPEN_GATES} | Spots: {len(VALID_PARKING_SPOTS)}")
 
 
 # -------------------------------------------------
@@ -1325,123 +2686,205 @@ def webhook_info():
 @app.post("/webhook")
 @app.post("/webhook.php")
 async def webhook(request: Request):
-    global _last_sim_hour
-    data = await request.json()
+    """Single entry point for the parking network.
+
+    Order of work, and why:
+      1. integrity guard  — an invalid, duplicated or tampered request never
+         reaches the car state machine, but is always counted and logged;
+      2. raw copy to MySQL — even a rejected request keeps its audit trail;
+      3. synchronous state update — occupancy and gate bookkeeping, cheap;
+      4. ordered dispatch  — the slow work (simulator calls) is queued per plate,
+         so a burst of arrivals is processed concurrently but never out of order.
+
+    The response is returned without waiting for step 4, so the simulator is
+    never blocked by our own processing.
+    """
+    global _last_sim_hour, _last_sim_time
+
+    body = await request.body()
+    source = request.client.host if request.client else "unknown"
+    data, verdict, reason = check_request_integrity(body, source)
+
+    # Keep the raw copy either way: db_hook runs its own checks and stores the
+    # payload on its worker thread, so this never waits on MySQL.
     await db_hook.record(request)
+
+    if verdict is not None:
+        print(f"[WEBHOOK REJECTED] {verdict}: {reason} from {source}")
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={"status": "rejected", "verdict": verdict, "reason": reason},
+        )
+
     print(f"[WEBHOOK] {data}")
     webhook_events.append(data)
-    if len(webhook_events) > 100:
-        webhook_events.pop(0)
 
-    try:
-        _last_sim_hour = int(str(data.get("ServerDateTime","")).split(" ")[1].split(":")[0])
-    except Exception:
-        pass
+    server_time = data.get("ServerDateTime", "")
+    parsed_time = parse_sim_time(server_time)
+    if parsed_time:
+        _last_sim_time = parsed_time
+        _last_sim_hour = parsed_time.hour
 
-    event_class = data.get("EventClass","")
-    spot_type   = data.get("SpotType","")
-    spot_name   = data.get("SpotName","")
-    direction   = data.get("Direction","")
+    event_class = data.get("EventClass", "")
+    spot_type   = data.get("SpotType", "")
+    spot_name   = data.get("SpotName", "")
+    direction   = data.get("Direction", "")
     car_plate   = data.get("CarPlateNumber") or data.get("CarPlate") or data.get("car_plate") or ""
 
-    if event_class in ("component_broken","component_failure"):
+    is_entry_spot = spot_type == "EntrySpot" or (spot_name and spot_name.upper().startswith("ENTRY"))
+    is_exit_spot  = spot_type == "ExitSpot" or (spot_name and spot_name.upper().startswith("EXIT"))
+    is_park_spot  = spot_type == "Park" or (spot_name and spot_name in parking_spots)
+
+    # ---------------- component health ----------------
+    if event_class in ("component_broken", "component_failure"):
         comp = data.get("Name") or data.get("ComponentName")
         if comp:
             component_health[comp] = {"broken": True, "under_maintenance": False}
             maintenance_wakeup.set()
+            response_cache.invalidate("spots")
             print(f"[COMPONENT] {comp} BROKEN.")
+            if comp in ALL_GATES:
+                note_gate_failure(comp, "simulator reported it broken")
+            record_incident("sensor_abnormal" if comp in parking_spots else "gate_failover",
+                            f"{comp} reported broken by the simulator", severity="warning",
+                            spot=comp if comp in parking_spots else None,
+                            gate=comp if comp in ALL_GATES else None,
+                            target_type="spot" if comp in parking_spots else "gate")
 
-    elif event_class in ("component_fixed","component_repaired"):
+    elif event_class in ("component_fixed", "component_repaired"):
         comp = data.get("Name") or data.get("ComponentName")
         if comp:
             component_health[comp] = {"broken": False, "under_maintenance": False}
-            if comp in parking_spots:
+            if comp in ALL_GATES:
+                note_gate_success(comp)
+            if comp in parking_spots and comp not in maintenance_mode:
                 async with spot_lock:
                     parking_spots[comp] = True
+            response_cache.invalidate("spots")
             print(f"[COMPONENT] {comp} REPAIRED.")
 
-    elif event_class in ("component_maintenance","component_under_maintenance"):
+    elif event_class in ("component_maintenance", "component_under_maintenance"):
         comp = data.get("Name") or data.get("ComponentName")
         if comp:
             component_health[comp] = {"broken": False, "under_maintenance": True}
             maintenance_wakeup.set()
+            response_cache.invalidate("spots")
 
-    elif event_class in ("payment_made","payment_received"):
-        # The simulator can emit fake payment events. Only a successful /charge
-        # response confirms payment; the raw webhook remains in the audit log.
-        print(f"[PAYMENT] Unverified payment event for {data.get('CarPlateNumber') or data.get('CarPlate')}")
+    elif event_class in ("payment_made", "payment_received"):
+        # The simulator can emit fake payment events. Only our own accepted /charge
+        # call settles a visit; anything else is reviewed and may be re-charged.
+        dispatch(car_plate or "payments", lambda d=data: review_payment_event(d), "payment review")
 
-    elif event_class in ("carbon_monoxide_event","carbon_monoxide_level_change"):
-        zone_name = data.get("ZoneName","ZONE1")
+    elif event_class in ("carbon_monoxide_event", "carbon_monoxide_level_change"):
+        zone_name = data.get("ZoneName", "ZONE1")
         co_level  = data.get("CarbonMonoxideLevel")
-        danger    = data.get("DangerLevel")   # Safe / Mid / High / Critical (webhooks come from Mid up)
+        danger    = data.get("DangerLevel")   # Safe / Mid / High / Critical
         print(f"[CO] Zone {zone_name}: {co_level} ppm, {danger}")
-        asyncio.create_task(update_zone_co(zone_name, co_level, danger))
+        dispatch(f"co:{zone_name}", lambda: update_zone_co(zone_name, co_level, danger), "CO reading")
 
     elif event_class == "penalty":
         print(f"[PENALTY] {data.get('CarPlateNumber')}: {data.get('Reason')} - ${data.get('FineAmount')}")
+        record_incident("integrity_warning",
+                        f"Simulator penalty: {data.get('Reason')} (${data.get('FineAmount')})",
+                        severity="warning", plate=data.get("CarPlateNumber"),
+                        spot=data.get("ComponentName") if data.get("ComponentName") in parking_spots else None,
+                        fine=data.get("FineAmount"), penalty_reason=data.get("Reason"))
 
-    # Ground-truth parking sync
-    if spot_type == "Park" or (spot_name and spot_name in parking_spots):
+    # ---------------- ground-truth parking sync ----------------
+    if is_park_spot and spot_name:
+        async with spot_lock:
+            believed_free = parking_spots.get(spot_name, True)
+        fault = note_sensor_reading(spot_name, direction, car_plate or None, believed_free)
+
+        detected = data.get("DetectedCars")
+        if isinstance(detected, list) and len(detected) > 1:
+            note_double_parked_spot(spot_name, len(detected))
+        elif isinstance(detected, int) and detected > 1:
+            note_double_parked_spot(spot_name, detected)
+
         async with spot_lock:
             if direction == "CarIn":
                 parking_spots[spot_name] = False
                 if car_plate:
                     if car_plate not in active_cars:
                         active_cars[car_plate] = {
-                            "entry_time":       data.get("ServerDateTime",""),
-                            "car_type":         data.get("CarType","Normal"),
+                            "entry_time":       server_time,
+                            "car_type":         data.get("CarType", "Normal"),
                             "assigned_spot":    spot_name,
                             "parked_spot":      spot_name,
-                            "planned_duration": float(data.get("PlannedParkingDurationInMinutes",1) or 1),
+                            "planned_duration": float(data.get("PlannedParkingDurationInMinutes", 1) or 1),
                             "charged": False, "parked": True,
                         }
                     else:
-                        active_cars[car_plate]["assigned_spot"] = spot_name
-                        active_cars[car_plate]["parked_spot"]   = spot_name
-                        active_cars[car_plate]["parked"]        = True
-                print(f"[SENSOR] {spot_name} OCCUPIED by {car_plate}.")
+                        active_cars[car_plate]["parked_spot"] = spot_name
+                        active_cars[car_plate]["parked"]      = True
+                print(f"[SENSOR] {spot_name} OCCUPIED by {car_plate or 'unknown'}.")
             elif direction == "CarOut":
-                parking_spots[spot_name] = True
+                if spot_name not in maintenance_mode:
+                    parking_spots[spot_name] = True
                 for p, info in list(active_cars.items()):
                     if info.get("assigned_spot") == spot_name:
                         info["assigned_spot"] = None
                 print(f"[SENSOR] {spot_name} FREE.")
+        response_cache.invalidate("spots")
 
-    if spot_type == "EntrySpot" or (spot_name and spot_name.upper().startswith("ENTRY")):
-        entry_name = (spot_name or "ENTRY1").upper()
+        if direction == "CarIn" and car_plate:
+            # Runs after the lock is released: it may free an abandoned reservation
+            # and raise the double-parking warning.
+            dispatch(car_plate, lambda p=car_plate, s=spot_name: note_vehicle_parked(p, s),
+                     "park bookkeeping")
+        elif direction == "CarOut":
+            note_vehicle_left_spot(car_plate, spot_name)
+
+        if fault:
+            dispatch(f"sensor:{spot_name}", lambda s=spot_name, f=fault: handle_sensor_fault(s, f),
+                     "sensor fault")
+
+    # ---------------- entry spot occupancy ----------------
+    if is_entry_spot:
+        entry_name = (spot_name or ENTRY_SPOTS[0]).upper()
         if entry_name in entry_occupied:
             if direction == "CarIn":
                 async with entry_lock:
                     entry_occupied[entry_name] = True
+                    entry_car[entry_name] = car_plate or entry_car.get(entry_name)
+                    entry_occupied_since[entry_name] = time.time()
+                note_vehicle_position(car_plate, entry_name, "at entrance", server_time)
             elif direction == "CarOut":
                 asyncio.create_task(auto_close_gate_after_delay(gate_for_entry_spot(entry_name), 0.3))
-                asyncio.create_task(process_waiting_entry(entry_name))
+                asyncio.create_task(process_waiting_entry(entry_name, car_plate or None))
+                note_vehicle_position(car_plate, entry_name, "entered the park", server_time)
 
-    if (spot_type == "ExitSpot" or (spot_name and spot_name.upper().startswith("EXIT"))) and direction == "CarOut":
+    # ---------------- exit spot ----------------
+    if is_exit_spot and direction == "CarOut":
         gate = exit_gate_for_spot(spot_name)
         if not car_plate or exit_inflight.get(gate) == car_plate:
             exit_inflight.pop(gate, None)
         if car_plate:
+            note_vehicle_position(car_plate, spot_name, "left the park", server_time)
             active_cars.pop(car_plate, None)
             charged_cars.discard(car_plate)
-        asyncio.create_task(auto_close_gate_after_delay(exit_gate_for_spot(spot_name), 0.3))
+            vehicle_tracks.pop(car_plate, None)
+            double_parking.pop(car_plate, None)
+            payment_state.pop(car_plate, None)
+        asyncio.create_task(auto_close_gate_after_delay(gate, 0.3))
 
     if not car_plate and spot_name and direction == "CarOut":
         car_plate = next(
             (p for p, info in active_cars.items()
-             if info.get("assigned_spot") == spot_name or info.get("parked_spot") == spot_name), ""
-        )
+             if info.get("assigned_spot") == spot_name or info.get("parked_spot") == spot_name), "")
 
-    if (spot_type == "EntrySpot" or (spot_name and spot_name.upper().startswith("ENTRY"))) and direction == "CarIn":
-        asyncio.create_task(process_car_entry(data))
-    elif (spot_type == "ExitSpot" or (spot_name and spot_name.upper().startswith("EXIT"))) and direction == "CarIn":
-        asyncio.create_task(process_car_exit(data))
+    # ---------------- slow work, strictly ordered per car ----------------
+    if is_entry_spot and direction == "CarIn":
+        dispatch(car_plate or f"entry:{spot_name}", lambda d=data: process_car_entry(d), "car entry")
+    elif is_exit_spot and direction == "CarIn":
+        dispatch(car_plate or f"exit:{spot_name}", lambda d=data: process_car_exit(d), "car exit")
 
     return {
         "status":           "dispatched",
         "gate_queue_sizes": {g: q.qsize() for g, q in gate_queues.items()},
         "free_spots":       sum(1 for v in parking_spots.values() if v),
+        "pending_events":   dispatch_depth(),
     }
 
 
@@ -1473,7 +2916,7 @@ def get_all_events(limit: int = 20):
 @app.get("/recent-activity")
 def get_recent_activity(limit: int = 25):
     items = []
-    for evt in reversed(webhook_events[-80:]):
+    for evt in reversed(list(webhook_events)[-120:]):
         event_class = evt.get("EventClass","")
         server_dt   = evt.get("ServerDateTime") or evt.get("Timestamp") or "Recent"
         time_str    = server_dt.split(" ")[-1] if " " in str(server_dt) else str(server_dt)
@@ -1539,8 +2982,7 @@ async def co_status():
     ]
 
 
-@app.get("/system-status")
-async def get_system_status():
+async def _build_system_status() -> dict:
     sim_online = False
     try:
         await call_simulator_api("list-parking-spots")
@@ -1549,20 +2991,30 @@ async def get_system_status():
         pass
 
     async with spot_lock:
-        total    = len(parking_spots)
-        free     = sum(1 for v in parking_spots.values() if v)
-        occupied = total - free
-        z1_free  = sum(1 for s,v in parking_spots.items() if s.startswith("S")   and v)
-        z2_free  = sum(1 for s,v in parking_spots.items() if s.startswith("bay") and v)
-        z3_free  = sum(1 for s,v in parking_spots.items() if s.startswith("P")   and v)
+        snapshot = dict(parking_spots)
+    total    = len(snapshot)
+    free     = sum(1 for v in snapshot.values() if v)
+    zone_free = {zone_id: sum(1 for s in zone["spots"] if snapshot.get(s))
+                 for zone_id, zone in ZONES.items()}
 
     return {
         "backend": "online", "simulator": "online" if sim_online else "offline",
-        "total_spots": total, "available_spots": free, "occupied_spots": occupied,
+        "total_spots": total, "available_spots": free, "occupied_spots": total - free,
         "cars_inside": len(active_cars), "park_full": free == 0,
         "broken_components": sum(1 for h in component_health.values() if h.get("broken")),
-        "zone_free": {"zone1": z1_free, "zone2": z2_free, "zone3": z3_free},
+        "spots_in_maintenance": len(maintenance_mode),
+        "open_incidents": len(double_parking) + len(maintenance_mode),
+        "pending_events": dispatch_depth(),
+        # Legacy keys the dashboard already reads ("zone1"), plus the zone ids.
+        "zone_free": {**{f"zone{i}": zone_free.get(z["id"], 0) for i, z in enumerate(ZONE_DEFS, 1)},
+                      **zone_free},
     }
+
+
+@app.get("/system-status")
+async def get_system_status():
+    # Polled by every open dashboard tab: computed at most once per CACHE_TTL_STATUS.
+    return await response_cache.get("system-status", CACHE_TTL_STATUS, _build_system_status)
 
 
 @app.get("/active-cars")
@@ -1590,6 +3042,50 @@ def get_active_cars():
             "status": "Exiting" if info.get("charged") else ("Parked" if info.get("parked") else "Arriving"),
         })
     return {"count": len(cars), "cars": cars}
+
+
+# -------------------------------------------------
+# VEHICLE LOCATION
+# -------------------------------------------------
+
+@app.get("/vehicles/locate/{plate}")
+async def locate_one_vehicle(plate: str, _: CurrentUser):
+    """Where is this car right now, including cars that ignored their assignment."""
+    return locate_vehicle(plate)
+
+
+@app.get("/vehicles/locate")
+async def locate_vehicles(_: CurrentUser, q: str = "", misparked_only: bool = False,
+                          limit: int = Query(100, ge=1, le=500)):
+    """Locate every tracked car, or the ones whose plate contains `q`.
+
+    `misparked_only` narrows this to the cars that are NOT in the spot they were
+    assigned — the ones an operator actually has to go and find.
+    """
+    plates = set(active_cars) | set(vehicle_tracks)
+    if q:
+        needle = q.strip().upper()
+        plates = {p for p in plates if needle in p.upper()}
+    found = []
+    for plate in sorted(plates):
+        located = locate_vehicle(plate)
+        if not located.get("found"):
+            continue
+        if misparked_only and located.get("in_assigned_spot"):
+            continue
+        if misparked_only and not located.get("assigned_spot") and not located.get("double_parked"):
+            continue
+        found.append(located)
+        if len(found) >= limit:
+            break
+    return {"count": len(found), "vehicles": found}
+
+
+@app.get("/double-parking")
+async def get_double_parking(_: CurrentUser):
+    """Open double-parking warnings, raised as soon as a second spot is claimed."""
+    rows = sorted(double_parking.values(), key=lambda w: w["since"], reverse=True)
+    return {"count": len(rows), "warnings": rows}
 
 
 @app.get("/vehicles/{plate}")
@@ -1689,8 +3185,7 @@ def get_usage_cycles():
 # SIMULATOR PASSTHROUGH GET ROUTES
 # -------------------------------------------------
 
-@app.get("/list-parking-spots")
-async def list_parking_spots():
+async def _build_spot_list() -> list[dict]:
     broken_spots = set()
     maint_spots  = set()
     try:
@@ -1708,14 +3203,10 @@ async def list_parking_spots():
         local_snap = dict(parking_spots)
 
     spots = []
-    zone_defs = [
-        ("Zone 1", [f"S{i}"   for i in range(1, 31)]),
-        ("Zone 2", [f"bay{i}" for i in range(36, 66)]),
-        ("Zone 3", [f"P{i}"   for i in range(69, 99)]),
-    ]
     i_global = 0
-    for zone_label, names in zone_defs:
-        for name in names:
+    for zone in ZONE_DEFS:
+        zone_label = zone["label"]
+        for name in zone["spots"]:
             i_global   += 1
             is_free     = local_snap.get(name, True)
             is_broken   = name in broken_spots or component_health.get(name,{}).get("broken",False)
@@ -1731,15 +3222,26 @@ async def list_parking_spots():
                         if evt.get("SpotName") == name:
                             assigned_plate = evt.get("CarPlate") or evt.get("car_plate") or evt.get("CarPlateNumber")
                             if assigned_plate: break
-            status = "maintenance" if (is_broken or is_maint) else ("occupied" if is_occupied else "free")
+            entry = maintenance_mode.get(name)
+            in_maintenance = is_broken or is_maint or entry is not None
+            status = "maintenance" if in_maintenance else ("occupied" if is_occupied else "free")
             spots.append({
-                "name": name, "zone": zone_label, "purpose": "Park",
+                "name": name, "zone": zone_label, "zoneId": zone["id"], "purpose": "Park",
                 "number": i_global, "spotType": get_spot_type(name),
                 "isOccupied": is_occupied, "detectedCars": 1 if is_occupied else 0,
-                "broken": is_broken, "isUnderMaintenance": is_maint, "isBroken": is_broken,
-                "status": status, "carPlateNumber": assigned_plate if is_occupied else None,
+                "broken": is_broken, "isUnderMaintenance": is_maint or entry is not None,
+                "isBroken": is_broken, "status": status,
+                "maintenanceReason": (entry or {}).get("reason"),
+                "sensorFault": _sensor(name)["last_fault"] if name in spot_sensor else None,
+                "carPlateNumber": assigned_plate if is_occupied else None,
             })
     return spots
+
+
+@app.get("/list-parking-spots")
+async def list_parking_spots():
+    # The heaviest dashboard call (one simulator round-trip). Shared between tabs.
+    return await response_cache.get("spots", CACHE_TTL_SPOTS, _build_spot_list)
 
 
 @app.get("/list-barriers")
@@ -1751,26 +3253,33 @@ async def list_barriers():
             {"name": g, "isOpen": False,
              "isBroken": component_health.get(g,{}).get("broken",False),
              "isUnderMaintenance": component_health.get(g,{}).get("under_maintenance",False),
-             "type": "Entrance" if g in ENTRANCE_GATES else "Exit"}
+             "type": "Entrance" if g in ENTRANCE_GATES else "Exit",
+             "zoneParent": zone_of_gate(g)}
             for g in ALL_GATES
         ]
 
 
+# Each list-* call has a simulated operating cost, and every dashboard tab polls
+# them. One call per CACHE_TTL_SIM_LIST serves all of them.
 @app.get("/list-lights")
 async def list_lights():
-    return await call_simulator_api("list-lights")
+    return await response_cache.get("list-lights", CACHE_TTL_SIM_LIST,
+                                    lambda: call_simulator_api("list-lights"))
 
 @app.get("/list-exhaust-fans")
 async def list_exhaust_fans():
-    return await call_simulator_api("list-exhaust-fans")
+    return await response_cache.get("list-exhaust-fans", CACHE_TTL_SIM_LIST,
+                                    lambda: call_simulator_api("list-exhaust-fans"))
 
 @app.get("/list-alarms")
 async def list_alarms():
-    return await call_simulator_api("list-alarms")
+    return await response_cache.get("list-alarms", CACHE_TTL_SIM_LIST,
+                                    lambda: call_simulator_api("list-alarms"))
 
 @app.get("/list-zones")
 async def list_zones():
-    return await call_simulator_api("list-zones")
+    return await response_cache.get("list-zones", CACHE_TTL_SIM_LIST,
+                                    lambda: call_simulator_api("list-zones"))
 
 @app.get("/test")
 async def test():
@@ -1859,3 +3368,270 @@ async def car_charge(name: str, _: CurrentUser, parking_cost: float = 0.0, charg
     await store_charge_async(name, parking_cost, charging_cost, 0, "Any", None)
     return result
         
+
+
+# -------------------------------------------------
+# ZONES
+# -------------------------------------------------
+
+@app.get("/zones")
+async def get_zones():
+    """Layout, capacity and gates of every zone, with live occupancy.
+
+    The dashboard builds its zone cards from this, so adding a zone to
+    ZONE_DEFS makes it appear without any frontend change.
+    """
+    async with spot_lock:
+        snapshot = dict(parking_spots)
+    out = []
+    for zone in ZONE_DEFS:
+        spots = zone["spots"]
+        free = [s for s in spots if snapshot.get(s) and spot_is_serviceable(s)]
+        maintenance = [s for s in spots
+                       if s in maintenance_mode
+                       or component_health.get(s, {}).get("broken")
+                       or component_health.get(s, {}).get("under_maintenance")]
+        entrances = [{"name": g, "entry_spot": zone["entry_spots"].get(g),
+                      "operable": await is_component_operable(g),
+                      "queue": gate_queues[g].qsize() if g in gate_queues else 0}
+                     for g in zone["entrances"]]
+        exits = [{"name": g, "exit_spot": zone["exit_spots"].get(g),
+                  "operable": await is_component_operable(g),
+                  "queue": gate_queues[g].qsize() if g in gate_queues else 0}
+                 for g in zone["exits"]]
+        out.append({
+            "id": zone["id"],
+            "label": zone["label"],
+            "capacity": len(spots),
+            "free": len(free),
+            "occupied": len(spots) - len(free) - len(maintenance),
+            "maintenance": len(maintenance),
+            "utilisation": round(1 - len(free) / len(spots), 3) if spots else 0.0,
+            "first_spot": spots[0] if spots else None,
+            "last_spot": spots[-1] if spots else None,
+            "reserved_types": sorted({get_spot_type(s) for s in spots} - {"Any"}),
+            "entrances": entrances,
+            "exits": exits,
+            "usable_entrances": sum(1 for g in entrances if g["operable"]),
+            "usable_exits": sum(1 for g in exits if g["operable"]),
+            "cars_inside": sum(1 for c in active_cars.values()
+                               if zone_of_spot(c.get("parked_spot") or c.get("assigned_spot") or "") == zone["id"]),
+        })
+    return out
+
+
+# -------------------------------------------------
+# MAINTENANCE MODE
+# -------------------------------------------------
+
+@app.get("/maintenance/spots")
+async def list_maintenance_spots():
+    """Every spot currently withdrawn from availability, and why."""
+    rows = []
+    for name, entry in sorted(maintenance_mode.items()):
+        sensor = spot_sensor.get(name, {})
+        rows.append({
+            "spot": name,
+            "zone": zone_of_spot(name),
+            "reason": entry["reason"],
+            "by": entry["by"],
+            "auto": entry["auto"],
+            "since": entry["since_text"],
+            "sensor_faults": sensor.get("faults", 0),
+            "last_fault": sensor.get("last_fault"),
+        })
+    return {"count": len(rows), "spots": rows,
+            "capacity_withdrawn": len(rows),
+            "total_spots": len(parking_spots)}
+
+
+class MaintenanceRequest(BaseModel):
+    reason: str = "manual maintenance"
+
+
+@app.post("/maintenance/spots/{name}/enable")
+async def enable_spot_maintenance(name: str, user: RepairDependency,
+                                  body: MaintenanceRequest | None = None):
+    """Take a spot out of service. It stops being allocated immediately."""
+    if name not in parking_spots:
+        raise HTTPException(404, f"{name} is not a parking spot in this park")
+    reason = (body.reason if body else None) or "manual maintenance"
+    return await set_maintenance_mode(name, True, reason=reason, actor=user.username)
+
+
+@app.post("/maintenance/spots/{name}/disable")
+async def disable_spot_maintenance(name: str, user: RepairDependency):
+    """Return a spot to service."""
+    if name not in maintenance_mode:
+        raise HTTPException(404, f"{name} is not in maintenance mode")
+    return await set_maintenance_mode(name, False, reason="returned to service",
+                                      actor=user.username)
+
+
+@app.get("/sensor-health")
+async def get_sensor_health():
+    """Per-spot sensor quality, worst first. Feeds the maintenance view."""
+    rows = [{
+        "spot": name,
+        "zone": zone_of_spot(name),
+        "faults": s["faults"],
+        "last_fault": s["last_fault"],
+        "last_direction": s["last_direction"],
+        "last_plate": s["last_plate"],
+        "last_seen": _utc_from_timestamp(s["last_at"]).strftime("%Y-%m-%d %H:%M:%S")
+        if s["last_at"] else None,
+        "in_maintenance": name in maintenance_mode,
+    } for name, s in spot_sensor.items() if s["faults"] or name in maintenance_mode]
+    rows.sort(key=lambda r: (-r["faults"], r["spot"]))
+    return {"count": len(rows), "spots": rows,
+            "healthy": len(parking_spots) - len(rows)}
+
+
+# -------------------------------------------------
+# REQUEST INTEGRITY (ADMIN)
+# -------------------------------------------------
+
+@app.get("/api/integrity/summary")
+async def integrity_summary(_: AdminDependency):
+    """Headline numbers for the admin integrity page."""
+    by_verdict = {k: v for k, v in integrity_stats.items() if k not in ("total", "accepted")}
+    duplicate_copies = sum(d["copies"] for d in duplicate_calls.values())
+    return {
+        "total_requests": integrity_stats["total"],
+        "accepted": integrity_stats["accepted"],
+        "rejected": sum(by_verdict.values()),
+        "by_verdict": dict(sorted(by_verdict.items())),
+        "duplicate_event_ids": len(duplicate_calls),
+        "duplicate_copies": duplicate_copies,
+        "last_sequence_id": _last_sequence_id,
+        "remembered_event_ids": len(_seen_event_ids),
+        "sources": len(_source_hits),
+        "rate_limit": {"window_seconds": INTEGRITY_RATE_WINDOW, "max_calls": INTEGRITY_RATE_LIMIT},
+    }
+
+
+@app.get("/api/integrity/requests")
+async def integrity_requests(_: AdminDependency, limit: int = Query(200, ge=1, le=500),
+                             verdict: str | None = None):
+    """Rejected and suspect requests, newest first."""
+    rows = [r for r in reversed(integrity_log) if verdict in (None, r["verdict"])]
+    return {"count": len(rows), "requests": rows[:limit]}
+
+
+@app.get("/api/integrity/duplicates")
+async def integrity_duplicates(_: AdminDependency, limit: int = Query(200, ge=1, le=500)):
+    """Duplicated calls, grouped by EventId, most repeated first.
+
+    A duplicate is never processed twice; this is the log of what was dropped.
+    """
+    rows = sorted(duplicate_calls.values(), key=lambda d: (-d["copies"], d["event_id"]))
+    return {"count": len(rows),
+            "total_copies": sum(d["copies"] for d in rows),
+            "duplicates": rows[:limit]}
+
+
+# -------------------------------------------------
+# INCIDENTS, REPORTS & METRICS
+# -------------------------------------------------
+
+@app.get("/api/incidents")
+async def get_incidents(_: CurrentUser, limit: int = Query(200, ge=1, le=1000),
+                        kind: str | None = None, severity: str | None = None,
+                        zone: str | None = None, since_minutes: float | None = None):
+    """The incident ledger: everything abnormal the backend noticed or did."""
+    cutoff = time.time() - since_minutes * 60 if since_minutes else None
+    rows = [
+        i for i in reversed(incidents)
+        if (kind is None or i["type"] == kind)
+        and (severity is None or i["severity"] == severity)
+        and (zone is None or i["zone"] == zone)
+        and (cutoff is None or i["at"] >= cutoff)
+    ]
+    return {"count": len(rows), "incidents": rows[:limit],
+            "types": dict(sorted(incident_counts.items()))}
+
+
+@app.get("/api/reports/incidents")
+async def incident_report(_: CurrentUser, since_minutes: float = Query(1440, ge=1)):
+    """Incident totals by type, severity and zone for the last `since_minutes`."""
+    cutoff = time.time() - since_minutes * 60
+    window = [i for i in incidents if i["at"] >= cutoff]
+    by_zone: dict[str, Counter] = defaultdict(Counter)
+    for entry in window:
+        by_zone[entry["zone"] or "unassigned"][entry["type"]] += 1
+    return {
+        "window_minutes": since_minutes,
+        "total": len(window),
+        "by_severity": dict(Counter(i["severity"] for i in window)),
+        "by_type": dict(sorted(Counter(i["type"] for i in window).items())),
+        "by_zone": {z: dict(sorted(c.items())) for z, c in sorted(by_zone.items())},
+        "critical": [i for i in reversed(window) if i["severity"] == "critical"][:25],
+        "lifetime_totals": dict(sorted(incident_counts.items())),
+    }
+
+
+@app.get("/api/reports/operations")
+async def operations_report(_: CurrentUser):
+    """One call with everything an operations report needs: capacity per zone,
+    gate availability, open incidents, payment health and event throughput."""
+    zones = await get_zones()
+    suspicious = [p for p, s in payment_state.items() if s["suspicions"]]
+    unsettled = [p for p, s in payment_state.items() if not s["confirmed"] and s["attempts"]]
+    return {
+        "generated_at": sim_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "simulator_time": _last_sim_time.strftime("%Y-%m-%d %H:%M:%S") if _last_sim_time else None,
+        "zones": zones,
+        "capacity": {
+            "total": len(parking_spots),
+            "free": sum(1 for s, free in parking_spots.items() if free and spot_is_serviceable(s)),
+            "in_maintenance": len(maintenance_mode),
+        },
+        "gates": {
+            "entrances": {g: {"operable": await is_component_operable(g),
+                              "failures": gate_failures.get(g, {}).get("count", 0),
+                              "queue": gate_queues[g].qsize()} for g in ENTRANCE_GATES},
+            "exits": {g: {"operable": await is_component_operable(g),
+                          "failures": gate_failures.get(g, {}).get("count", 0),
+                          "queue": gate_queues[g].qsize()} for g in EXIT_GATES},
+        },
+        "payments": {
+            "settled": sum(1 for s in payment_state.values() if s["confirmed"]),
+            "unsettled": len(unsettled),
+            "suspicious": len(suspicious),
+            "suspicious_plates": suspicious[:25],
+        },
+        "integrity": {
+            "total_requests": integrity_stats["total"],
+            "accepted": integrity_stats["accepted"],
+            "rejected": sum(v for k, v in integrity_stats.items()
+                            if k not in ("total", "accepted")),
+            "duplicate_event_ids": len(duplicate_calls),
+        },
+        "incidents": {
+            "open_double_parking": len(double_parking),
+            "lifetime": dict(sorted(incident_counts.items())),
+            "recent": list(reversed(incidents))[:20],
+        },
+        "throughput": {
+            "queued": dispatch_stats["queued"],
+            "completed": dispatch_stats["completed"],
+            "failed": dispatch_stats["failed"],
+            "dropped": dispatch_stats["dropped"],
+            "pending": dispatch_depth(),
+            "peak_queue_depth": _dispatch_peak_depth,
+        },
+    }
+
+
+@app.get("/metrics")
+async def get_metrics():
+    """Backend health under load. No authentication: it exposes no park data."""
+    return {
+        "cache": response_cache.stats(),
+        "dispatch": {**dispatch_stats, "pending": dispatch_depth(),
+                     "peak_queue_depth": _dispatch_peak_depth,
+                     "active_keys": len(_dispatch_workers)},
+        "webhooks": {"total": integrity_stats["total"], "accepted": integrity_stats["accepted"]},
+        "cars_inside": len(active_cars),
+        "incidents": sum(incident_counts.values()),
+    }

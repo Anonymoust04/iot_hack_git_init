@@ -11,6 +11,7 @@ import Penalties from "./pages/Penalties.jsx";
 import Audit from "./pages/Audit.jsx";
 import Reports from "./pages/Reports.jsx";
 import AdminUsers from "./pages/AdminUsers.jsx";
+import AdminIntegrity from "./pages/AdminIntegrity.jsx";
 import Layout from "./components/Layout.jsx";
 
 function AdminOnly({ children }) {
@@ -83,6 +84,17 @@ function App() {
             <AdminOnly>
               <Layout>
                 <AdminUsers />
+              </Layout>
+            </AdminOnly>
+          }
+        />
+
+        <Route
+          path="/admin/integrity"
+          element={
+            <AdminOnly>
+              <Layout>
+                <AdminIntegrity />
               </Layout>
             </AdminOnly>
           }

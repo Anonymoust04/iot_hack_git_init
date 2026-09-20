@@ -7,6 +7,7 @@ import main
 import pytest
 
 from app.services import device_overrides
+from app.services.webhook_handlers import compute_signature
 
 
 class FakeSim:
@@ -92,9 +93,13 @@ def test_reading_without_risk_label_uses_the_mid_line(sim):
 
 
 def test_co_webhook_triggers_ventilation(sim, client):
-    client.post("/webhook", json={"EventClass": "carbon_monoxide_event", "ZoneName": "ZONE1",
-                                  "CarbonMonoxideLevel": 63.564693, "DangerLevel": "Mid", "EventId": "co-test-1",
-                                  "SequenceId": 1, "ServerDateTime": "2026-09-20 05:00:00"})
+    # main.py rejects unsigned webhooks (WEBHOOK_REQUIRE_SIGNATURE), so sign this one
+    # the same way the simulator does.
+    payload = {"EventClass": "carbon_monoxide_event", "ZoneName": "ZONE1",
+               "CarbonMonoxideLevel": 63.564693, "DangerLevel": "Mid", "EventId": "co-test-1",
+               "SequenceId": 1, "ServerDateTime": "2026-09-20 05:00:00"}
+    payload["Signature"] = compute_signature({k: str(v) for k, v in payload.items()})
+    client.post("/webhook", json=payload)
     for _ in range(80):
         if {("fan1", "on"), ("fan2", "on")} <= set(sim.commands):
             break

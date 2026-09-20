@@ -552,6 +552,123 @@ export async function deleteUser(id) {
   return request(`/api/auth/users/${id}`, { method: 'DELETE' });
 }
 
+// ---- Level 2: request integrity (admin), zones, maintenance, incidents, vehicle locating ----
+
+// Admin only: everything the backend rejected as invalid, duplicated or tampered.
+export async function getIntegritySummary() {
+  return request('/api/integrity/summary');
+}
+
+export async function getIntegrityRequests(verdict = '') {
+  const query = verdict ? `&verdict=${encodeURIComponent(verdict)}` : '';
+  const data = await request(`/api/integrity/requests?limit=300${query}`);
+  return (data.requests || []).map((row) => ({
+    id: `${row.event_id || 'no-id'}-${row.at}`,
+    time: row.at_text,
+    verdict: row.verdict,
+    reason: row.reason,
+    source: row.source,
+    eventId: row.event_id || '—',
+    sequenceId: row.sequence_id ?? '—',
+    eventClass: row.event_class || '—',
+    plate: row.plate || '—',
+    spot: row.spot || '—',
+    severity: row.severity,
+    digest: row.payload_digest,
+  }));
+}
+
+// Duplicated calls, grouped by EventId. Each was logged and dropped, never processed twice.
+export async function getDuplicateCalls() {
+  const data = await request('/api/integrity/duplicates?limit=300');
+  return (data.duplicates || []).map((row) => ({
+    id: row.event_id,
+    eventId: row.event_id,
+    eventClass: row.event_class || '—',
+    plate: row.plate || '—',
+    spot: row.spot || '—',
+    copies: row.copies,
+    firstSeen: row.first_seen_text,
+    lastSeen: row.last_seen_text,
+    sources: (row.sources || []).join(', ') || '—',
+  }));
+}
+
+// Zone layout + live occupancy. Driven by ZONE_DEFS in main.py, so a new zone needs no UI change.
+export async function getParkingZones() {
+  try {
+    const zones = await request('/zones');
+    return Array.isArray(zones) ? zones : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getMaintenanceSpots() {
+  return request('/maintenance/spots');
+}
+
+export async function setSpotMaintenance(name, on, reason = 'manual maintenance') {
+  const path = `/maintenance/spots/${encodeURIComponent(name)}/${on ? 'enable' : 'disable'}`;
+  return request(path, { method: 'POST', body: on ? JSON.stringify({ reason }) : undefined });
+}
+
+export async function getSensorHealth() {
+  try {
+    return await request('/sensor-health');
+  } catch {
+    return { count: 0, spots: [] };
+  }
+}
+
+export async function getIncidents({ kind = '', severity = '', sinceMinutes = 1440 } = {}) {
+  const params = new URLSearchParams({ limit: '300', since_minutes: String(sinceMinutes) });
+  if (kind) params.set('kind', kind);
+  if (severity) params.set('severity', severity);
+  const data = await request(`/api/incidents?${params}`);
+  return (data.incidents || []).map((row) => ({
+    id: row.id,
+    time: row.at_text,
+    type: row.type,
+    severity: row.severity,
+    reason: row.reason,
+    plate: row.plate || '—',
+    spot: row.spot || row.gate || '—',
+    zone: row.zone || '—',
+    details: row.details,
+  }));
+}
+
+export async function getIncidentReport(sinceMinutes = 1440) {
+  return request(`/api/reports/incidents?since_minutes=${sinceMinutes}`);
+}
+
+export async function getOperationsReport() {
+  return request('/api/reports/operations');
+}
+
+export async function getDoubleParking() {
+  try {
+    const data = await request('/double-parking');
+    return data.warnings || [];
+  } catch {
+    return [];
+  }
+}
+
+// Where is this car right now — including cars that never reached their assigned spot.
+export async function locateVehicle(plate) {
+  return request(`/vehicles/locate/${encodeURIComponent(plate)}`);
+}
+
+export async function locateVehicles({ q = '', misparkedOnly = false } = {}) {
+  const params = new URLSearchParams({ limit: '200' });
+  if (q) params.set('q', q);
+  if (misparkedOnly) params.set('misparked_only', 'true');
+  const data = await request(`/vehicles/locate?${params}`);
+  return data.vehicles || [];
+}
+
 /**
  * Authentication with roles (Admin / Operator)
  */

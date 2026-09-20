@@ -1,0 +1,235 @@
+.integrity-page {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 40px 48px;
+  color: #172033;
+}
+
+.integrity-header {
+  margin-bottom: 30px;
+}
+
+.integrity-header h1 {
+  margin: 0 0 8px;
+  font-size: 32px;
+}
+
+.integrity-header p {
+  margin: 0;
+  max-width: 70ch;
+  color: #6b7280;
+}
+
+.integrity-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.integrity-card,
+.integrity-panel {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+.integrity-card {
+  padding: 24px;
+}
+
+.integrity-card span {
+  display: block;
+  margin-bottom: 12px;
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.integrity-card strong {
+  font-size: 32px;
+}
+
+.integrity-card small {
+  display: block;
+  margin-top: 6px;
+  color: #9ca3af;
+  font-size: 12px;
+}
+
+.integrity-card.ok strong { color: #15803d; }
+.integrity-card.bad strong { color: #b91c1c; }
+.integrity-card.warn strong { color: #b45309; }
+
+.integrity-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 28px;
+}
+
+.integrity-breakdown button {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 10px 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: white;
+  color: #374151;
+  cursor: pointer;
+}
+
+.integrity-breakdown button.active {
+  border-color: #1e293b;
+  background: #1e293b;
+  color: white;
+}
+
+.integrity-breakdown button span {
+  font-size: 13px;
+  text-transform: capitalize;
+}
+
+.integrity-breakdown button strong {
+  font-size: 16px;
+}
+
+.integrity-panel {
+  padding: 28px;
+}
+
+.integrity-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.integrity-tabs button {
+  padding: 10px 16px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: #6b7280;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.integrity-tabs button.active {
+  border-bottom-color: #1e293b;
+  color: #111827;
+  font-weight: 600;
+}
+
+.integrity-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.integrity-filters button {
+  padding: 8px 13px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: white;
+  color: #374151;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.integrity-filters button.active {
+  border-color: #1e293b;
+  background: #1e293b;
+  color: white;
+}
+
+.integrity-scroll {
+  overflow-x: auto;
+}
+
+.integrity-table {
+  width: 100%;
+  min-width: 980px;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.integrity-table th {
+  padding: 14px 12px;
+  text-align: left;
+  color: white;
+  background: #1e293b;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.integrity-table td {
+  padding: 14px 12px;
+  border-bottom: 1px solid #e5e7eb;
+  vertical-align: top;
+}
+
+.integrity-table td small {
+  display: block;
+  margin-top: 4px;
+  color: #9ca3af;
+  font-size: 11px;
+}
+
+.integrity-table code {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #f3f4f6;
+  font-size: 12px;
+}
+
+.integrity-tag {
+  display: inline-block;
+  padding: 5px 10px;
+  border-radius: 20px;
+  background: #f3f4f6;
+  color: #4b5563;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.integrity-tag.warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.integrity-tag.critical {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.integrity-tag.info {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.integrity-empty {
+  margin: 0;
+  padding: 36px 12px;
+  text-align: center;
+  color: #6b7280;
+}
+
+@media (max-width: 900px) {
+  .integrity-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 550px) {
+  .integrity-page {
+    padding: 25px;
+  }
+
+  .integrity-summary {
+    grid-template-columns: 1fr;
+  }
+}

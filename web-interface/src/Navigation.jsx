@@ -73,6 +73,11 @@ function Navigation({ expanded, onToggle, onNavigate }) {
           <Link to="/reports#financial" onClick={onNavigate} className={location.hash === "#financial" ? "active" : ""}>Financial Report</Link>
         </div>}
         {role === "ADMIN" && (
+          <NavLink to="/admin/integrity" onClick={onNavigate} title="Request Integrity">
+            <span className="navigation-letter">I</span><span className="navigation-label">INTEGRITY</span>
+          </NavLink>
+        )}
+        {role === "ADMIN" && (
           <NavLink to="/admin/users" onClick={onNavigate} title="User Management">
             <span className="navigation-letter">U</span><span className="navigation-label">USER MANAGEMENT</span>
           </NavLink>

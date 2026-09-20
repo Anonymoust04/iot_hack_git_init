@@ -33,13 +33,19 @@ class Settings(BaseSettings):
     stale_entering_minutes: float = 3
     # Reject webhooks whose MD5 Signature doesn't match (fake payments). Only turn off to debug.
     webhook_verify_signature: bool = True
-    # Reject unsigned webhooks as well as invalid signatures. Set explicitly to false only when
-    # developing against a simulator build that cannot sign payloads.
-    webhook_require_signature: bool = True
+    # Reject unsigned webhooks as well as invalid signatures. OFF by default: the shipped
+    # simulator sends "Signature": null on every webhook (docs/LEVEL1.md), so requiring one
+    # would drop all traffic. Unsigned requests are still counted and listed on the admin
+    # integrity page. A WRONG signature is always rejected, whatever this is set to.
+    webhook_require_signature: bool = False
     # Which barriers (GET /list-barriers) are entrances / exits, so the dashboard can label them.
-    # Comma-separated. Defaults = the Level 2 park (same as ENTRANCE_GATES / EXIT_GATES in main.py).
+    # Comma-separated. Defaults = the Level 2 park. main.py discovers the real map from the
+    # simulator at startup and only uses these to override its gate pairing.
     entry_gate: str = "gate1,gate3,gate5"
     exit_gate: str = "gate2,gate4,gate6"
+    # Gates held OPEN from startup and never closed by the automation (the through-gates of
+    # the Level 3 map). Comma-separated; empty = none.
+    always_open_gates: str = "gate7,gate19"
 
     # MySQL (Aiven). Values come from .env, never hard-code them.
     db_host: str
