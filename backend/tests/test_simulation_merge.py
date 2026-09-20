@@ -147,6 +147,21 @@ def test_occupied_entry_releases_waiting_cars_in_order(monkeypatch):
     assert main.entry_queues["ENTRY2"].empty()
 
 
+def test_same_car_is_not_queued_twice_for_the_same_entry(monkeypatch):
+    monkeypatch.setattr(main, "entry_lock", asyncio.Lock())
+    monkeypatch.setattr(main, "entry_occupied", {"ENTRY1": True, "ENTRY2": False, "ENTRY3": False})
+    monkeypatch.setattr(main, "entry_queues", {name: asyncio.Queue() for name in main.entry_occupied})
+
+    async def run_queue():
+        await main.send_car_to_entry_or_queue("CAR-1", "ENTRY1", "S1")
+        await main.send_car_to_entry_or_queue("CAR-1", "ENTRY1", "S1")
+
+    asyncio.run(run_queue())
+
+    assert main.entry_queues["ENTRY1"].qsize() == 1
+    assert main.entry_occupied["ENTRY1"] is True
+
+
 def test_preventive_spot_repair_remains_available(monkeypatch):
     monkeypatch.setattr(main, "parking_spots", {"S1": True})
     monkeypatch.setattr(main, "active_cars", {})

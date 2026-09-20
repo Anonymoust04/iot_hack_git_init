@@ -73,7 +73,7 @@ function GateControl({ systemOnline = false }) {
     setAutomaticFeedback(null);
     try {
       await enableAutomaticGates();
-      setAutomaticFeedback({ type: 'success', msg: 'Automatic gate control enabled' });
+      setAutomaticFeedback({ type: 'success', msg: 'Automatic gate control restored' });
       await refreshGates();
     } catch (err) {
       setAutomaticFeedback({ type: 'error', msg: err.message });
@@ -99,7 +99,7 @@ function GateControl({ systemOnline = false }) {
             type="button"
             disabled={!systemOnline || automaticLoading}
             onClick={handleEnableAutomatic}
-            title="Let the system open and close gates automatically for arriving and departing cars"
+            title="Admin/operator can restore automatic gate open/close control after a manual override"
             style={{
               padding: '9px 14px',
               border: '1px solid #2563eb',
@@ -111,7 +111,7 @@ function GateControl({ systemOnline = false }) {
               whiteSpace: 'nowrap',
             }}
           >
-            {automaticLoading ? 'Enabling...' : 'All Gates: Automatic'}
+            {automaticLoading ? 'Restoring...' : 'Restore Auto Gates'}
           </button>
         </div>
       </div>

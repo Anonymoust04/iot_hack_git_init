@@ -70,6 +70,17 @@ def test_busy_or_open_gate_waits_until_safe(monkeypatch):
     assert commands == [("barrier-gates/gate1/repair", "POST")]
 
 
+def test_broken_idle_open_gate_repairs_without_waiting_for_closed_state(monkeypatch):
+    _, commands = setup_maintenance(
+        monkeypatch,
+        barriers=[{"name": "gate1", "state": "Open", "broken": True, "isUnderMaintenance": False}],
+    )
+
+    asyncio.run(main.maintenance_scan_once())
+
+    assert commands == [("barrier-gates/gate1/repair", "POST")]
+
+
 def test_broken_spot_repairs_after_car_leaves(monkeypatch):
     state, commands = setup_maintenance(
         monkeypatch,

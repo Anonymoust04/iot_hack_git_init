@@ -273,9 +273,14 @@ async def send_car_to_entry_or_queue(car_plate: str, entry_name: str, assigned_s
         entry_name = "ENTRY1"
 
     async with entry_lock:
+        queue = entry_queues[entry_name]
         if entry_occupied[entry_name]:
+            pending = list(getattr(queue, "_queue", []))
+            if any(item.get("car_plate") == car_plate for item in pending):
+                print(f"[ENTRY WAIT] {entry_name} already queued for {car_plate}; skipping duplicate.")
+                return {"status": "queued", "entry": entry_name, "duplicate": True}
             print(f"[ENTRY WAIT] {entry_name} occupied -> queueing {car_plate}")
-            entry_queues[entry_name].put_nowait({"car_plate": car_plate, "assigned_spot": assigned_spot})
+            queue.put_nowait({"car_plate": car_plate, "assigned_spot": assigned_spot})
             return {"status": "queued", "entry": entry_name}
         entry_occupied[entry_name] = True
 
@@ -688,7 +693,6 @@ async def _maintain_spot(name: str, reason: str = "maintenance alarm") -> bool:
 async def _maintain_gate(name: str, reason: str = "maintenance alarm") -> bool:
     q = gate_queues.get(name)
     if (q is None or not q.empty() or has_manual_override(name)
-            or barrier_states.get(name, "").lower() != "closed"
             or (name in ENTRANCE_GATES and entry_occupied[entry_spot_for_gate(name)])):
         return False
     print(f"[PREEMPTIVE MAINTENANCE] Gate {name} IDLE - repairing...")
