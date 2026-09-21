@@ -7,7 +7,7 @@ Zones          : Zone 1 -> S1-S30 | Zone 2 -> bay36-bay65 | Zone 3 -> P69-P98
 
 Key behaviours
 --------------
-- Plate-based, queue-aware routing spreads cars across all three zones
+- Plate-based, queue-aware routing  cars across all three zones
 - Vehicle-type-aware spot selection (Electric -> EV spots, Accessible -> Accessible spots)
 - Re-entry guard: rerouted cars arriving at the correct gate are let through immediately
 - Fee charged only after the car has confirmed physically parked (Park/CarIn event)
@@ -495,7 +495,7 @@ def check_request_integrity(body: bytes, source: str) -> tuple[dict, str | None,
     verdict is None when the payload may be processed; any other verdict means
     the request is rejected and must not touch the car state machine.
     """
-    global _last_sequence_id
+    global _last_sequence_id, _last_sim_time
     integrity_stats["total"] += 1
 
     try:
@@ -599,6 +599,9 @@ def check_request_integrity(body: bytes, source: str) -> tuple[dict, str | None,
                             "Simulator clock jumped backwards (level reload?); re-baselining",
                             severity="warning", plate=payload.get("CarPlateNumber"),
                             source=source, skew_seconds=round(skew, 1))
+
+    if server_dt:
+        _last_sim_time = server_dt
 
     # --- unknown target ---------------------------------------------------
     # The map is discovered at runtime and can change between levels, so an
@@ -1276,7 +1279,8 @@ def gate_presumed_failed(gate: str) -> bool:
 # Spots and gates are grouped by zoneParent. Within a zone, gates are paired with
 # that zone's EntrySpots first and ExitSpots second, in name order — the same
 # convention Level 2 uses (gate1/ENTRY1, gate2/EXIT1). ENTRY_GATE / EXIT_GATE in
-# .env override the pairing for any gate they name.
+# .env override the pairing for any gate they name, but only once they are set to
+# something other than their Level 2 defaults (see build_zone_defs).
 #
 # Gates with no zone of their own (Level 3's gate7 and gate19) are not part of the
 # car routing; they are listed in OTHER_GATES and handled by ALWAYS_OPEN_GATES.
@@ -2699,7 +2703,7 @@ async def webhook(request: Request):
     The response is returned without waiting for step 4, so the simulator is
     never blocked by our own processing.
     """
-    global _last_sim_hour, _last_sim_time
+    global _last_sim_hour
 
     body = await request.body()
     source = request.client.host if request.client else "unknown"
@@ -2722,8 +2726,7 @@ async def webhook(request: Request):
     server_time = data.get("ServerDateTime", "")
     parsed_time = parse_sim_time(server_time)
     if parsed_time:
-        _last_sim_time = parsed_time
-        _last_sim_hour = parsed_time.hour
+        _last_sim_hour = parsed_time.hour   # _last_sim_time is kept by the integrity guard
 
     event_class = data.get("EventClass", "")
     spot_type   = data.get("SpotType", "")
@@ -3362,12 +3365,22 @@ async def car_goto(name: str, _: CurrentUser, destination: str):
 
 
 @app.post("/car/{name}/charge")
-async def car_charge(name: str, _: CurrentUser, parking_cost: float = 0.0, charging_cost: float = 0.0):
-    result = await api_charge_car(name, parking_cost, charging_cost)
-    charged_cars.add(name)
-    await store_charge_async(name, parking_cost, charging_cost, 0, "Any", None)
-    return result
-        
+async def car_charge(name: str, user: CurrentUser, parking_cost: float = 0.0, charging_cost: float = 0.0):
+    """Charge a car by hand. Goes through the same verified path as the exit gate, so it
+    is recorded, audited, and refused if the visit has already been settled (the
+    simulator penalises charging one visit twice)."""
+    if payment_is_settled(name):
+        raise HTTPException(status.HTTP_409_CONFLICT, f"{name} has already been charged for this visit")
+    record_incident("payment_retry", f"{user.username} charged {name} by hand",
+                    severity="info", plate=name, actor=user.username, target_type="payment",
+                    parking=parking_cost, charging=charging_cost)
+    settled = await charge_with_verification(name, parking_cost, charging_cost,
+                                             reason=f"manual charge by {user.username}")
+    if not settled:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"The simulator did not accept the charge for {name}")
+    return {"status": "charged", "plate": name,
+            "total": round(parking_cost + charging_cost, 2)}
+
 
 
 # -------------------------------------------------

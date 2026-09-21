@@ -117,7 +117,11 @@ during a demo: they start a second copy of the automation.
 - Times are stored in UTC; a car's visit times use the simulator's own clock (`ServerDateTime`).
 - The simulator reports only a car count per spot, so plates come from webhooks: start the backend before cars arrive.
 - Penalties are the simulator's own penalty events; we store and report them.
-- Parking charges are not stored in the database yet, so the financial report is empty.
+- Parking charges the backend makes itself are recorded in `payment_records`, so the financial report has real
+  numbers. A visit is settled only when the simulator accepts our charge; a payment event that does not match it
+  is treated as suspicious and payment is requested again.
+- The level map (zones, spots, entrance/exit gates) is read from the simulator at startup, so a different level
+  needs no code change. `ALWAYS_OPEN_GATES` (default `gate7,gate19`) are held open for the whole level.
 
 ## Layout
 
@@ -127,7 +131,7 @@ backend/fastapi_project/db_hook.py  MySQL layer: CORS, API routers, stores webho
 backend/app/                        models, services (parking, audit, penalties, login attempts, ...), API routes
 backend/tests/                      pytest suite              database/schema.sql   all table definitions
 web-interface/                      React dashboard           scripts/              deployment scripts
-docs/                               level checklists, event types, simulator API notes
+docs/                               level checklists, event types, simulator API notes (see docs/LEVEL3.md)
 ```
 
 ## Team

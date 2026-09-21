@@ -8,7 +8,12 @@ from app.services.parking import recover_manual_parking
 from app.services.webhook_handlers import receive
 
 
-def test_unsigned_webhook_is_logged_and_not_processed(db):
+def test_unsigned_webhook_is_logged_and_not_processed(db, monkeypatch):
+    """Strict policy only: WEBHOOK_REQUIRE_SIGNATURE is off by default because the
+    shipped simulator sends no signature at all (docs/LEVEL1.md)."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "webhook_require_signature", True)
     payload = b'{"EventClass":"gate_action","Name":"gateU","Action":"Open"}'
 
     parsed, reason = receive(db, payload)

@@ -30,8 +30,30 @@ The raw `WEBHOOK` row is saved before a webhook handler runs. A processed webhoo
 | `COMPONENT_FIXED` | Gate or spot reported fixed | Component webhook (`Type`, `Name`, and simulator metadata), when supplied. |
 | `PENALTY` | Simulator assessed a fine | Full penalty webhook, including `Reason`, `FineAmount`, `Type`, `ComponentName`, and sometimes `CarPlateNumber`. |
 | `CO_ALERT` | Simulator reported mid, high, or critical carbon monoxide | Full carbon monoxide webhook. |
+| `INTEGRITY_REJECTED` | A request from the parking network was dropped: malformed, unsigned (strict mode), tampered, duplicated, flooding, or an unusable plate | `severity`, `reason`, `zone`, plus `source` and, for a duplicate, `copies` and `event_class`. |
+| `INTEGRITY_WARNING` | A request was processed but is not trusted: a sequence gap, an out-of-order `SequenceId`, a backwards clock jump, an unknown spot/gate name, a simulator penalty, or a failed event handler | `severity`, `reason`, plus `missed`/`last`/`got`, `skew_seconds`, `field`, or `error` depending on the cause. |
+| `SENSOR_ABNORMAL` | A spot sensor contradicted itself (second `CarIn` with no `CarOut`, occupancy with no plate, flapping, or occupied with no vehicle for a long time) | `severity`, `reason`, `zone`, `faults` (how many faults this spot has had). |
+| `SPOT_MAINTENANCE` | A spot was withdrawn from availability or returned to it, by an operator or automatically after repeated sensor faults | `severity`, `reason`, `zone`, `auto`; on return also `was` (the previous reason). |
+| `DOUBLE_PARKING` | One plate occupies more than one spot, or one spot reports more than one vehicle. Raised on the second `CarIn`, before the simulator's own penalty | `severity`, `reason`, `zone`, `spots`, `zones`, or `detected` for a spot-side report. |
+| `VEHICLE_MISPARKED` | A car parked in a different spot from the one assigned to it; its reservation is released | `severity`, `reason`, `zone`, `assigned` (the spot it was sent to). |
+| `PAYMENT_SUSPICIOUS` | A payment event did not match our own charge, named a car we never charged, repeated an already-settled visit, or the charge failed every attempt | `severity`, `reason`, `amount`, `expected`. |
+| `PAYMENT_RETRY` | Payment was requested again after a failed or suspicious one | `severity`, `reason`, `expected`, `attempt`. |
+| `PAYMENT_SETTLED` | The simulator accepted our charge, or a payment event matched it | `severity`, `reason`, `parking`, `charging`, `attempts`, or `amount`. |
+| `GATE_FAILOVER` | A gate was unusable and traffic was moved to another one, or it started answering again | `severity`, `reason`, `zone`, `alternative` (the gate used instead). |
+| `ZONE_CAPACITY` | The level map was loaded from the simulator, or the built-in fallback was used | `severity`, `reason`, `zones`, `spots`, or `error`. |
 
 Gate open/close webhooks currently update `gates` but create only the raw `WEBHOOK` event; they do not create a separate gate event type. New automation can add one using the rule below.
+
+## Incidents (Level 3)
+
+`main.py` records every abnormal thing it notices or does through one function,
+`record_incident()`. Each incident writes **both** an `events` row (the types above,
+searchable on `/api/logs/events` and counted in the daily summary) and an `audit_logs`
+row (visible on the Audit page), so nothing is only in memory. `raw_data` always carries
+`severity` (`info` / `warning` / `critical`), `reason` and `zone`; the table lists what
+each type adds. The live ring is served by `GET /api/incidents` and summarised by
+`GET /api/reports/incidents`; rejected and duplicated requests also appear on the
+Admin -> Integrity page (`GET /api/integrity/*`).
 
 ## Naming new operational events
 
